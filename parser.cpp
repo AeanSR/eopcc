@@ -143,16 +143,17 @@ final_report_t& final_report() {
   return fr;
 }
 
+void rewind_function_instantiation_stack();
 struct cursor_t {
   int lineno;
   int charno;
   cursor_t() : lineno(0), charno(0) { }
   cursor_t(int l, int c) : lineno(l), charno(c) { }
   std::ostream& error() {
-    return errors_occurred++, std::cout << lineno + 1 << ":" << charno + 1 << ":" << "error: ";
+    return errors_occurred++, rewind_function_instantiation_stack(), std::cout << lineno + 1 << ":" << charno + 1 << ":" << "error: ";
   }
   std::ostream& warn() {
-    return warnings_occurred++, std::cout << lineno + 1 << ":" << charno + 1 << ":" << "warning: ";
+    return warnings_occurred++, rewind_function_instantiation_stack(), std::cout << lineno + 1 << ":" << charno + 1 << ":" << "warning: ";
   }
   std::ostream& note() {
     return std::cout << lineno + 1 << ":" << charno + 1 << ":" << "note: ";
@@ -699,6 +700,13 @@ struct vexpr_t : public ast_node_t {
   std::shared_ptr<ident_t> var;
   virtual bool _parse() {
     return expect(var);
+  }
+};
+
+struct fake_assign_t : public ast_node_t {
+  std::shared_ptr<ident_t> lhs;
+  virtual bool _parse() {
+    return expect(lhs);
   }
 };
 
@@ -1387,9 +1395,8 @@ struct symbol_val_t : public symbol_t {
 };
 
 struct symbol_stmt_t : public symbol_t {
-  int64_t accumulative_time;
   using ptr = std::shared_ptr<symbol_stmt_t>;
-  symbol_stmt_t(ast_node_t::ptr cur) : symbol_t(cur), accumulative_time(0) { }
+  symbol_stmt_t(ast_node_t::ptr cur) : symbol_t(cur) { }
 };
 
 struct symbol_fundamental_type_t : public symbol_type_t {
@@ -1486,10 +1493,10 @@ struct symbol_handler_type_t : public symbol_fundamental_type_t {
   virtual symbol_type_t::ptr degrade() const { return std::make_shared<symbol_void_type_t>(); }
   virtual std::string _name() const { return "exception"s; }
   template<class... Args>
-  static std::shared_ptr<symbol_void_type_t> new_(Args&&... args) { return std::make_shared<symbol_handler_type_t>(std::forward<Args>(args)...); }
+  static std::shared_ptr<symbol_handler_type_t> new_(Args&&... args) { return std::make_shared<symbol_handler_type_t>(std::forward<Args>(args)...); }
   virtual ptr intern(bool ex=false) const { auto c = std::make_shared<symbol_handler_type_t>(*this); c->external = ex; return c; }
   virtual ptr constant(bool co=false) const { auto c = std::make_shared<symbol_handler_type_t>(*this); c->const_ = co; return c; }
-  symbol_handler_type_t(const symbol_handler_type_t& rhs) : symbol_fundamental_type_t(rhs), func(func) { }
+  symbol_handler_type_t(const symbol_handler_type_t& rhs) : symbol_fundamental_type_t(rhs) { }
 };
 
 struct symbol_func_type_t : public symbol_fundamental_type_t {
@@ -1572,19 +1579,19 @@ struct symbol_arglist_t : public symbol_val_t {
 
 struct symbol_call_t : public symbol_val_t {
   bool async;
-  symbol_func_type_t::ptr func;
+  symbol_val_t::ptr func;
   std::vector<symbol_val_t::ptr> args;
   std::vector<symbol_val_t::ptr> args_byval;
   symbol_stmt_t::ptr exec;
   symbol_call_t(ast_node_t::ptr ast, bool async, symbol_val_t::ptr func, std::vector<symbol_val_t::ptr>& args, std::vector<symbol_val_t::ptr>& args_byval, symbol_stmt_t::ptr exec) :
-      symbol_val_t(ast, async ? (func->type->to<symbol_func_type_t>() ? symbol_handler_type_t::new_(ast) : nullptr) : symbol_void_type_t::new_(ast)), async(async),
+      symbol_val_t(ast, async ? static_cast<symbol_type_t::ptr>(func->type->to<symbol_func_type_t>() ? symbol_handler_type_t::new_(ast) : nullptr) : static_cast<symbol_type_t::ptr>(symbol_void_type_t::new_(ast))), async(async),
       func(func), args(args), args_byval(args_byval), exec(exec) { }
   virtual bool rvvalue() const { return async; }
 };
 
 struct symbol_func_t : public symbol_val_t {
   ast_node_t::ptr body;
-  symbol_func_t(ast_node_t::ptr, ast, symbol_func_type_t::ptr type, ast_node_t::ptr body) : symbol_val_t(ast, type), body(body) { }
+  symbol_func_t(ast_node_t::ptr ast, symbol_func_type_t::ptr type, ast_node_t::ptr body) : symbol_val_t(ast, type), body(body) { }
 };
 
 struct symbol_lit_t : public symbol_val_t {
@@ -1851,8 +1858,12 @@ struct symbol_continue_t : public symbol_stmt_t {
 };
 
 struct symbol_return_t : public symbol_stmt_t {
-  symbol_val_t::ptr ret;
-  symbol_return_t(ast_node_t::ptr ast, symbol_val_t::ptr ret) : symbol_stmt_t(ast), ret(ret) { }
+  symbol_return_t(ast_node_t::ptr ast) : symbol_stmt_t(ast) { }
+};
+
+struct symbol_await_t : public symbol_stmt_t {
+  symbol_call_t::ptr handler;
+  symbol_await_t(ast_node_t::ptr ast, symbol_call_t::ptr handler) : symbol_stmt_t(ast), handler(handler) { }
 };
 
 struct symbol_loop_t : public symbol_stmt_t {
@@ -2048,7 +2059,17 @@ struct function_instantiation_frame_t : public cursor_t {
 
 std::list<function_instantiation_frame_t> function_instantiation_stack;
 void rewind_function_instantiation_stack() {
-  
+  for (auto&& f : function_instantiation_stack) {
+    std::stringstream ss;
+    bool first = true;
+    ss << "[";
+    for (auto&& a : f.args) {
+      ss << (first ? ""s : ", "s) << a->type->name() << (a->lvalue() ? "&"s : ""s);
+      first = false;
+    }
+    ss << "]";
+    f.note() << "in instantiation of " << f.func_type << " with arguments " << ss.str() << f.eol();
+  }
 }
 
 symbol_t::ptr prob(std::shared_ptr<ast_node_t> ast) {
@@ -2150,26 +2171,28 @@ symbol_t::ptr prob(std::shared_ptr<ast_node_t> ast) {
         for (size_t i = 0; i < std::min(vargs.size(), func->args.size()); i++) {
           rvck(vargs[i]);
           symbol_val_t::ptr param = vargs[i];
-          if (!param->lvalue) {
+          if (!param->lvalue()) {
             param = std::make_shared<symbol_var_t>(ast, param->type, func->args[i]);
-            stmts->list.push_back(std::make_shared<symbol_alloc_t>(ast, param));
-            auto assign = std::make_shared<assignment_t>();
+            stmts->list.push_back(std::make_shared<symbol_alloc_t>(ast, param->to<symbol_var_t>()));
+            auto assign = std::make_shared<fake_assign_t>();
             assign->lhs = std::make_shared<ident_t>();
             assign->lhs->name = func->args[i];
-            stmts->list.push_back(std::make_shared<symbol_eval_t>(ast, symbol_case_assign(assign, vargs[i])));
+            stmts->list.push_back(std::make_shared<symbol_eval_t>(ast, symbol_case_assign(assign, vargs[i])->to<symbol_val_t>()));
             vargs_byval.push_back(param);
           }
           symbol_registry.front()[func->args[i]] = param;
         }
+        function_instantiation_stack.emplace_back(ast, func, vargs);
         stmts->list.push_back(prob(lhs->body)->to<symbol_stmt_t>());
+        function_instantiation_stack.pop_back();
         if (!async) {
           for (auto&& v : vargs_byval)
-            stmts->list.push_back(std::make_shared<symbol_free_t>(ast, param));
+            stmts->list.push_back(std::make_shared<symbol_free_t>(ast, v->to<symbol_var_t>()));
         }
         symbol_registry.pop_front();
       }
 
-      return std::make_shared<symbol_call_t>(ast, async, func, vargs, vargs_byval, stmts);
+      return std::make_shared<symbol_call_t>(ast, async, lhs, vargs, vargs_byval, stmts);
     },
 
     +[](std::shared_ptr<postfix_t> ast)->symbol_t::ptr {
@@ -2533,26 +2556,55 @@ symbol_t::ptr prob(std::shared_ptr<ast_node_t> ast) {
           stmts->list.push_back(std::make_shared<symbol_free_t>(ast, previous));
         }
       }
-      stmts->list.push_back(std::make_shared<symbol_alloc_t>(ast, var));
-      if (init) {
-        if (ast->is_arg) {
-          init->error() << "default argument is not implemented." << init->eol();
-        }
-        if (!type->is_scalar()) {
-          init->error() << "initialize of non-scalar variables is not implemented." << init->eol();
-        }
-        if (type->const_) {
-          if (init->constexpr_eval().index() == 0) {
-            init->error() << "const variable initializer must be constant." << init->eol();
+      if (type is typeid(symbol_handler_type_t)) {
+        if (init) {
+          if (init is typeid(symbol_call_t) && init->rvvalue()) {
+            symbol_registry.front()[name] = init;
+          } else if (init is typeid(symbol_call_t)) {
+            init->error() << "exception handler must be initialized with an async function call. got sync function call." << ast->eol();
+            init->type->note() << "type defined from here:" << init->type->eol();
+          } else {
+            init->error() << "exception handler must be initialized with an async function call. got " << init->type->name() << ast->eol();
+            init->type->note() << "type defined from here:" << init->type->eol();
           }
-          var->constval = init->constexpr_eval();
+        } else {
+          ast->error() << "exception handler must be initialized with an async function call." << ast->eol();
         }
-      } else if (type->const_) {
-        ast->warn() << "const variable default initialized to zero." << ast->eol();
-        var->constval = (int64_t)0;
+      } else {
+        stmts->list.push_back(std::make_shared<symbol_alloc_t>(ast, var));
+        if (init) {
+          if (!type->is_scalar()) {
+            init->error() << "initialize of non-scalar variables is not implemented." << init->eol();
+          }
+          if (type->const_) {
+            if (init->constexpr_eval().index() == 0) {
+              init->error() << "const variable initializer must be constant." << init->eol();
+            }
+            var->constval = init->constexpr_eval();
+          }
+        } else if (type->const_) {
+          ast->warn() << "const variable default initialized to zero." << ast->eol();
+          var->constval = (int64_t)0;
+        }
+        symbol_registry.front()[name] = var;
       }
-      symbol_registry.front()[name] = var;
+
       return stmts;
+    },
+
+    +[](std::shared_ptr<funcdecl_t> ast)->symbol_t::ptr {
+      std::vector<std::string> args;
+      std::string name = ast->name;
+      for (auto&& v : ast->args)
+        args.push_back(v->var->name);
+      if (name in symbol_registry.front()) {
+        ast->warn() << "function definition hides previous defined symbol in current scope." << ast->eol();
+        symbol_registry.front()[name]->note() << "previous defined here:" << symbol_registry.front()[name]->eol();
+      }
+      auto func_type = symbol_func_type_t::new_(ast, name, args);
+      auto func = std::make_shared<symbol_func_t>(ast, func_type, ast->body);
+      symbol_registry.front()[name] = func;
+      return func;
     },
 
     +[](std::shared_ptr<compstmt_t> ast)->symbol_t::ptr {
@@ -2621,15 +2673,7 @@ symbol_t::ptr prob(std::shared_ptr<ast_node_t> ast) {
     },
 
     +[](std::shared_ptr<retstmt_t> ast)->symbol_t::ptr {
-      auto ret = prob(ast->ret)->to<symbol_val_t>();
-      auto rvck = [&](symbol_val_t::ptr opr) {
-        if (opr->rvvalue()) {
-          ast->error() << "expression do not accept rv-value. convert to lvalue by assignment first." << ast->eol();
-          opr->type->note() << "type defined from here:" << opr->type->eol();
-        } return 0;
-      };
-      rvck(ret);
-      return std::make_shared<symbol_return_t>(ast, ret);
+      return std::make_shared<symbol_return_t>(ast);
     },
 
     +[](std::shared_ptr<contstmt_t> ast)->symbol_t::ptr {
@@ -2640,6 +2684,14 @@ symbol_t::ptr prob(std::shared_ptr<ast_node_t> ast) {
       return std::make_shared<symbol_break_t>(ast);
     },
 
+    +[](std::shared_ptr<awaitstmt_t> ast)->symbol_t::ptr {
+      auto handler = prob(ast->handler)->to<symbol_call_t>();
+      if (!handler) {
+        ast->error() << "await statement expects an exception handler." << ast->eol();
+      }
+      return std::make_shared<symbol_await_t>(ast, handler);
+    },
+
     +[](std::shared_ptr<ctrlstmt_t> ast)->symbol_t::ptr {
       if (ast->for_) return prob(ast->for_);
       if (ast->if_) return prob(ast->if_);
@@ -2647,6 +2699,7 @@ symbol_t::ptr prob(std::shared_ptr<ast_node_t> ast) {
       if (ast->while_) return prob(ast->while_);
       if (ast->ret_) return prob(ast->ret_);
       if (ast->cont_) return prob(ast->cont_);
+      if (ast->await_) return prob(ast->await_);
       return prob(ast->break_);
     },
 
