@@ -33,7 +33,7 @@ int verbose_level = 0;
 std::set<std::string> keywords = {
   "if", "else", "for", "do", "while", "continue", "break", "return", "print",
   "sizeof", "typeof",
-  "except", "def", "async", "await",
+  "def", "async", "await", "except",
   "conv", "pool", "mm", "act", "trans", "cycleadd",
   "int", "float", "vector", "extern", "intern", "const"
 };
@@ -742,8 +742,10 @@ struct callexpr_t : public ast_node_t {
   std::shared_ptr<expr_t> args;
 
   virtual bool _parse() {
-    return guard((expect_key("async") ? (async = true) : ((async = false), true))
-               && expect(lhs) && expect_punc("(") && (expect(args), true) && expect_punc(")"));
+    return guard([&](){
+      async = expect_key("async");
+      return expect(lhs) && expect_punc("(") && (expect(args), true) && expect_punc(")");
+    }());
   }
 };
 
@@ -1502,15 +1504,15 @@ struct symbol_handler_type_t : public symbol_fundamental_type_t {
 struct symbol_func_type_t : public symbol_fundamental_type_t {
   bool except;
   std::vector<std::string> args;
-  std::string name;
-  symbol_func_type_t(ast_node_t::ptr ast = nullptr, std::string name = "<anonymous-func>"s, std::vector<std::string> args = {}) :
-      symbol_fundamental_type_t(ast), name(name), args(args) { }
+  std::string func_name;
+  symbol_func_type_t(ast_node_t::ptr ast = nullptr, std::string func_name = "<anonymous-func>"s, std::vector<std::string> args = {}) :
+      symbol_fundamental_type_t(ast), func_name(func_name), args(args) { }
   virtual int64_t sizeof_() const { return 8; }
-  virtual uint64_t signature() const { uint64_t sig = knuth(knuth(knuth(__LINE__)) ^ knuth(name.c_str())); for (auto&& a : args) sig = knuth(sig ^ knuth(a.c_str())); return sig; }
+  virtual uint64_t signature() const { uint64_t sig = knuth(knuth(knuth(__LINE__)) ^ knuth(func_name.c_str())); for (auto&& a : args) sig = knuth(sig ^ knuth(a.c_str())); return sig; }
   virtual symbol_type_t::ptr degrade() const { return std::make_shared<symbol_void_type_t>(); }
   virtual std::string _name() const {
     std::stringstream ss;
-    ss << (except ? "except:": "func:") << name << "(";
+    ss << (except ? "except:": "func:") << func_name << "(";
     bool first = true;
     for (auto&& p : args) {
       ss << (first ? "" : ",") << p;
@@ -1523,7 +1525,7 @@ struct symbol_func_type_t : public symbol_fundamental_type_t {
   static std::shared_ptr<symbol_func_type_t> new_(Args&&... args) { return std::make_shared<symbol_func_type_t>(std::forward<Args>(args)...); }
   virtual ptr intern(bool ex=false) const { return nullptr; }
   virtual ptr constant(bool co=false) const { return nullptr; }
-  symbol_func_type_t(const symbol_func_type_t& rhs) : symbol_fundamental_type_t(rhs), except(rhs.except), name(rhs.name), args(rhs.args) { }
+  symbol_func_type_t(const symbol_func_type_t& rhs) : symbol_fundamental_type_t(rhs), except(rhs.except), func_name(rhs.func_name), args(rhs.args) { }
 };
 
 struct symbol_array_type_t : public symbol_type_t {
@@ -1590,8 +1592,8 @@ struct symbol_call_t : public symbol_val_t {
 };
 
 struct symbol_func_t : public symbol_val_t {
-  ast_node_t::ptr body;
-  symbol_func_t(ast_node_t::ptr ast, symbol_func_type_t::ptr type, ast_node_t::ptr body) : symbol_val_t(ast, type), body(body) { }
+  std::shared_ptr<compstmt_t> body;
+  symbol_func_t(ast_node_t::ptr ast, symbol_func_type_t::ptr type, std::shared_ptr<compstmt_t> body) : symbol_val_t(ast, type), body(body) { }
 };
 
 struct symbol_lit_t : public symbol_val_t {
@@ -1654,7 +1656,7 @@ struct symbol_cast_t : public symbol_val_t {
     return false;
   }
   virtual bool lvalue() const { return from->type is typeid(symbol_vec_type_t) && type is typeid(symbol_vec_type_t) && from->lvalue(); }
-  virtual bool rvvalue() const { return from->rvvalue(); }
+  virtual bool rvvalue() const { return from->rvvalue() || (!(from->type is typeid(symbol_vec_type_t)) && type is typeid(symbol_vec_type_t)); }
 };
 
 struct symbol_descript_t : public symbol_val_t {
@@ -1788,9 +1790,9 @@ struct symbol_binary_t : public symbol_val_t {
     } return 0; };
     auto lv = lhs->constexpr_eval();
     auto rv = rhs->constexpr_eval();
-    if (lv.index() == 1)
+    if (lv.index() == 1 && rv.index() == 1)
       { int64_t z; op(std::get<int64_t>(lv), std::get<int64_t>(rv), z); return z; }
-    if (lv.index() == 2)
+    if (lv.index() == 2 && rv.index() == 2)
       { double z; op(std::get<double>(lv), std::get<double>(rv), z); return z; }
     return std::monostate();
   }
@@ -1862,8 +1864,8 @@ struct symbol_return_t : public symbol_stmt_t {
 };
 
 struct symbol_await_t : public symbol_stmt_t {
-  symbol_call_t::ptr handler;
-  symbol_await_t(ast_node_t::ptr ast, symbol_call_t::ptr handler) : symbol_stmt_t(ast), handler(handler) { }
+  std::shared_ptr<symbol_call_t> handler;
+  symbol_await_t(ast_node_t::ptr ast, std::shared_ptr<symbol_call_t> handler) : symbol_stmt_t(ast), handler(handler) { }
 };
 
 struct symbol_loop_t : public symbol_stmt_t {
@@ -1988,9 +1990,9 @@ symbol_t::ptr symbol_case_binary_operators(std::shared_ptr<T> ast,
           lhs = std::make_shared<symbol_cast_t>(ast, lhs, symbol_float_type_t::new_(ast));
         if (rhs->type->signature() == symbol_vec_type_t::new_()->signature())
           rhs = std::make_shared<symbol_cast_t>(ast, rhs, symbol_float_type_t::new_(ast));
-        if (lhs->type->is_scalar() && lhs->type is typeid(symbol_vec_type_t))
+        if (rhs->type->is_scalar() && lhs->type is typeid(symbol_vec_type_t))
           rhs = std::make_shared<symbol_cast_t>(ast, rhs, symbol_float_type_t::new_(ast));
-        else if (rhs->type->is_scalar() && rhs is typeid(symbol_vec_type_t))
+        if (lhs->type->is_scalar() && rhs->type is typeid(symbol_vec_type_t))
           lhs = std::make_shared<symbol_cast_t>(ast, lhs, symbol_float_type_t::new_(ast));
         if (lhs->type is typeid(symbol_vec_type_t) && rhs->type is typeid(symbol_vec_type_t)
           && lhs->type->signature() != rhs->type->signature()) {
@@ -1998,9 +2000,9 @@ symbol_t::ptr symbol_case_binary_operators(std::shared_ptr<T> ast,
           lhs->type->note() << "type defined from here:" << lhs->type->eol();
           rhs->type->note() << "type defined from here:" << rhs->type->eol();
         }
-        if (lhs->type is typeid(symbol_float_type_t) && rhs->type is typeid(symbol_int_type_t))
+        if ((lhs->type is typeid(symbol_float_type_t) || lhs->type is typeid(symbol_vec_type_t)) && rhs->type is typeid(symbol_int_type_t))
           rhs = std::make_shared<symbol_cast_t>(ast, rhs, lhs->type);
-        else if (rhs->type is typeid(symbol_float_type_t) && lhs->type is typeid(symbol_int_type_t))
+        else if ((rhs->type is typeid(symbol_float_type_t) || rhs->type is typeid(symbol_vec_type_t)) && lhs->type is typeid(symbol_int_type_t))
           lhs = std::make_shared<symbol_cast_t>(ast, lhs, rhs->type); 
       }
       if (!std::get<2>(oplut[ast->type])) {
@@ -2068,7 +2070,7 @@ void rewind_function_instantiation_stack() {
       first = false;
     }
     ss << "]";
-    f.note() << "in instantiation of " << f.func_type << " with arguments " << ss.str() << f.eol();
+    f.note() << "in instantiation of " << f.func_type->name() << " with arguments " << ss.str() << f.eol();
   }
 }
 
@@ -2142,6 +2144,10 @@ symbol_t::ptr prob(std::shared_ptr<ast_node_t> ast) {
 
     +[](std::shared_ptr<callexpr_t> ast)->symbol_t::ptr {
       bool async = ast->async;
+      if (async && is_in_except) {
+        ast->error() << "cannot make async function calls from another async function call." << ast->eol();
+        return std::make_shared<symbol_null_t>(ast, "<invalid-async-call>");
+      }
       auto lhs = prob(ast->lhs)->to<symbol_func_t>();
       auto func = lhs ? lhs->type->to<symbol_func_type_t>() : nullptr;
       auto arg = prob(ast->args)->to<symbol_val_t>();
@@ -2177,13 +2183,18 @@ symbol_t::ptr prob(std::shared_ptr<ast_node_t> ast) {
             auto assign = std::make_shared<fake_assign_t>();
             assign->lhs = std::make_shared<ident_t>();
             assign->lhs->name = func->args[i];
+            symbol_registry.emplace_front(); // cheat the assign case.
+            symbol_registry.front()[func->args[i]] = param;
             stmts->list.push_back(std::make_shared<symbol_eval_t>(ast, symbol_case_assign(assign, vargs[i])->to<symbol_val_t>()));
+            symbol_registry.pop_front();
             vargs_byval.push_back(param);
           }
           symbol_registry.front()[func->args[i]] = param;
         }
         function_instantiation_stack.emplace_back(ast, func, vargs);
+        if (async) is_in_except = true;
         stmts->list.push_back(prob(lhs->body)->to<symbol_stmt_t>());
+        if (async) is_in_except = false;
         function_instantiation_stack.pop_back();
         if (!async) {
           for (auto&& v : vargs_byval)
@@ -2547,19 +2558,20 @@ symbol_t::ptr prob(std::shared_ptr<ast_node_t> ast) {
       }
       auto current = scoped_lookup(name);
       if (current) {
-        if (!(current is typeid(symbol_var_t))) {
+        if (!(current is typeid(symbol_var_t) || current is typeid(symbol_call_t))) {
           ast->error() << "declaration of variable conflicts with a non-variable symbol." << ast->eol();
           current->note() << "previous declaration is from here:" << current->eol();
         }
         if (name in symbol_registry.front()) {
           auto previous = current->to<symbol_var_t>();
-          stmts->list.push_back(std::make_shared<symbol_free_t>(ast, previous));
+          if (previous) stmts->list.push_back(std::make_shared<symbol_free_t>(ast, previous));
         }
       }
       if (type is typeid(symbol_handler_type_t)) {
         if (init) {
           if (init is typeid(symbol_call_t) && init->rvvalue()) {
             symbol_registry.front()[name] = init;
+            stmts->list.push_back(std::make_shared<symbol_eval_t>(ast, init));
           } else if (init is typeid(symbol_call_t)) {
             init->error() << "exception handler must be initialized with an async function call. got sync function call." << ast->eol();
             init->type->note() << "type defined from here:" << init->type->eol();
@@ -2623,7 +2635,15 @@ symbol_t::ptr prob(std::shared_ptr<ast_node_t> ast) {
     },
 
     +[](std::shared_ptr<exprstmt_t> ast)->symbol_t::ptr {
-      return std::make_shared<symbol_eval_t>(ast, prob(ast->expr)->to<symbol_val_t>());
+      auto val = prob(ast->expr)->to<symbol_val_t>();
+      auto rvck = [&](symbol_val_t::ptr opr) {
+        if (opr->rvvalue()) {
+          ast->error() << "expression do not accept rv-value. convert to lvalue by assignment first." << ast->eol();
+          opr->type->note() << "type defined from here:" << opr->type->eol();
+        } return 0;
+      };
+      rvck(val); 
+      return std::make_shared<symbol_eval_t>(ast, val);
     },
 
 #define LOOP_COND auto cond = prob(ast->cond)->to<symbol_val_t>(); \
@@ -2646,10 +2666,13 @@ symbol_t::ptr prob(std::shared_ptr<ast_node_t> ast) {
     +[](std::shared_ptr<forstmt_t> ast)->symbol_t::ptr {
       auto init = prob(ast->init)->to<symbol_val_t>();
       auto step = prob(ast->step)->to<symbol_val_t>();
+
       LOOP_COND
       rvck(init), rvck(step);
       return std::make_shared<symbol_loop_t>(ast, std::make_shared<symbol_eval_t>(ast->init, init),
-          std::make_shared<symbol_continue_t>(ast->cond, cond), prob(ast->body)->to<symbol_stmt_t>(), 
+          std::make_shared<symbol_break_t>(ast->cond,
+            std::make_shared<symbol_unary_t>(ast->cond, cond, symbol_unary_t::NOT)),
+          prob(ast->body)->to<symbol_stmt_t>(), 
           std::make_shared<symbol_eval_t>(ast->step, step));
     },
 
@@ -2662,14 +2685,15 @@ symbol_t::ptr prob(std::shared_ptr<ast_node_t> ast) {
       LOOP_COND
       return std::make_shared<symbol_loop_t>(ast, nullptr,
           nullptr, prob(ast->body)->to<symbol_stmt_t>(), 
-          std::make_shared<symbol_continue_t>(ast->cond, cond));
+          std::make_shared<symbol_break_t>(ast->cond,
+            std::make_shared<symbol_unary_t>(ast->cond,cond,symbol_unary_t::NOT)));
     },
 
     +[](std::shared_ptr<whilestmt_t> ast)->symbol_t::ptr {
       LOOP_COND
       return std::make_shared<symbol_loop_t>(ast, nullptr,
           std::make_shared<symbol_break_t>(ast->cond, std::make_shared<symbol_unary_t>(ast->cond, cond, symbol_unary_t::NOT)),
-          prob(ast->body)->to<symbol_stmt_t>(), std::make_shared<symbol_continue_t>(ast->cond)); 
+          prob(ast->body)->to<symbol_stmt_t>(), nullptr); 
     },
 
     +[](std::shared_ptr<retstmt_t> ast)->symbol_t::ptr {
@@ -3227,6 +3251,7 @@ std::list<std::vector<alloc_t::ptr>> active;
 
 using genval_t = std::variant<std::monostate, reg_t, addr_t::ptr, std::shared_ptr<symbol_func_t>, std::string>;
 std::list<inst_t::ptr> lst;
+std::list<inst_t::ptr> elst;
 template<class... Args>
 inst_t::ptr inst(std::string name, Args... args) {
   return std::make_shared<vinst_t<Args...>>(name, args...);
@@ -3256,6 +3281,9 @@ addr_t operator+(addr_t lhs, reg_t offset) {
     return lhs;
   }
 }
+
+void exec(symbol_stmt_t::ptr stmt);
+reg_t except_reg(0);
 
 genval_t eval(symbol_val_t::ptr val) {
   auto cv = val->constexpr_eval();
@@ -3290,6 +3318,24 @@ genval_t eval(symbol_val_t::ptr val) {
       return arg;
     },
 
+    +[](std::shared_ptr<symbol_call_t> val)->genval_t {
+      if (val->async) {
+        auto async_entry = inst("nop");
+        pinst("raise", reg_t(0), async_entry);
+        elst.push_back(async_entry);
+        swap(elst, lst);
+        except_reg = reg_t::alloc(val);
+        is_in_except = true;
+      }
+      exec(val->exec);
+      if (val->async) {
+        pinst("yield", reg_t::alloc(val));
+        swap(elst, lst);
+        is_in_except = false;
+      }
+      return reg_t::alloc(val);
+    },
+
     +[](std::shared_ptr<symbol_cast_t> val)->genval_t {
       auto origin = val->from->type;
       auto from = eval(val->from);
@@ -3299,12 +3345,39 @@ genval_t eval(symbol_val_t::ptr val) {
         auto p = std::get<addr_t::ptr>(from);
         p->strike = to->sizeof_();
         return p;
+      } else if (to is typeid(symbol_vec_type_t) && to->is_scalar()) {
+        if (origin->external) {
+          pinst("loads", reg_t::alloc(val), std::get<addr_t::ptr>(from)->opr(val));
+          from = reg_t::alloc(val);
+        }
+        if (origin is typeid(symbol_int_type_t)) {
+          if (std::holds_alternative<reg_t>(from)) {
+            pinst("cvtif", reg_t::alloc(val), std::get<reg_t>(from));
+          } else if (std::holds_alternative<addr_t::ptr>(from)) {
+            pinst("loads", reg_t::alloc(val), std::get<addr_t::ptr>(from)->opr(val));
+            pinst("cvtif", reg_t::alloc(val), reg_t::alloc(val));
+          }
+        }
+        if (origin is typeid(symbol_float_type_t)) {
+          if (std::holds_alternative<reg_t>(from)) {
+          } else if (std::holds_alternative<addr_t::ptr>(from)) {
+            pinst("loads", reg_t::alloc(val), std::get<addr_t::ptr>(from)->opr(val));
+          }
+        }
+        if (origin is typeid(symbol_vec_type_t)) {
+          pinst("movvs", reg_t::alloc(val), std::get<addr_t::ptr>(from)->opr(val));
+        }
+        auto rv = std::make_shared<addr_t>(val, true, 0, to->sizeof_())->rv(true);
+        pinst("movsv", rv, reg_t::alloc(val));
+        return rv;
       } else {
         if (origin->external) {
           pinst("loads", reg_t::alloc(val), std::get<addr_t::ptr>(from)->opr(val));
           from = reg_t::alloc(val);
         }
-        if (origin is typeid(symbol_float_type_t) && to is typeid(symbol_int_type_t)) {
+        if (origin->signature() == to->signature()) {
+          return from;
+        } else if (origin is typeid(symbol_float_type_t) && to is typeid(symbol_int_type_t)) {
           if (std::holds_alternative<reg_t>(from)) {
             pinst("cvtfi", reg_t::alloc(val), std::get<reg_t>(from));
           } else if (std::holds_alternative<addr_t::ptr>(from)) {
@@ -3431,11 +3504,12 @@ genval_t eval(symbol_val_t::ptr val) {
 
     +[](std::shared_ptr<symbol_binary_t> val)->genval_t {
       auto lhs = eval(val->lhs);
+      reg_t r = reg_t::alloc(val);
       reg_t t = reg_t::alloc();
       if (val->lhs->type->is_scalar() && !(val->lhs->type is typeid(symbol_vec_type_t))
           && std::holds_alternative<addr_t::ptr>(lhs)) {
-        pinst("loads", reg_t::alloc(val), std::get<addr_t::ptr>(lhs)->opr(val));
-        lhs = reg_t::alloc(val);
+        pinst("loads", r, std::get<addr_t::ptr>(lhs)->opr(val));
+        lhs = r;
       }
       auto rhs = eval(val->rhs);
       if (val->rhs->type->is_scalar() && !(val->rhs->type is typeid(symbol_vec_type_t))
@@ -3448,12 +3522,12 @@ genval_t eval(symbol_val_t::ptr val) {
         const std::string iname[] = { "muli", "divi", "modi", "addi", "subi", "shli", "shri",
             "lti", "gti", "lei", "gei", "eqi", "nei", "andi", "xori", "ori", "andi", "ori" };
         if (val->opcode >= symbol_binary_t::LAND && val->opcode <= symbol_binary_t::LOR) {
-          pinst("nei", reg_t::alloc(val), reg_t(0), std::get<reg_t>(lhs));
+          pinst("nei", r, reg_t(0), std::get<reg_t>(lhs));
           pinst("nei", t, reg_t(0), std::get<reg_t>(rhs));
-          lhs = reg_t::alloc(val); rhs = t;
+          lhs = r; rhs = t;
         }
-        pinst(iname[val->opcode], reg_t::alloc(val), std::get<reg_t>(lhs), std::get<reg_t>(rhs));
-        return reg_t::alloc(val);
+        pinst(iname[val->opcode], r, std::get<reg_t>(lhs), std::get<reg_t>(rhs));
+        return r;
       }
       // F - F
       if (val->lhs->type is typeid(symbol_float_type_t) && val->rhs->type is typeid(symbol_float_type_t)) {
@@ -3662,6 +3736,13 @@ void exec(symbol_stmt_t::ptr stmt) {
       }
     },
 
+    +[](std::shared_ptr<symbol_await_t> stmt) {
+      auto todel = stmt->handler->args_byval;
+      for (auto&& v : todel)
+        exec(std::make_shared<symbol_free_t>(null_ast(), v->to<symbol_var_t>()));
+      pinst("await", reg_t::alloc(stmt->handler));
+    },
+
     +[](std::shared_ptr<symbol_stmt_list_t> stmt) {
       for (auto&& s : stmt->list) {
         exec(s);
@@ -3696,9 +3777,11 @@ void exec(symbol_stmt_t::ptr stmt) {
     },
 
     +[](std::shared_ptr<symbol_return_t> stmt) {
-      if (!return_point) {
-        pinst("exit");
-      } else { // TODO return value.
+      if (is_in_except) {
+        pinst("yield", except_reg);
+      } else if (!return_point) {
+        pinst("halt");
+      } else {
         pinst("jz", reg_t(0), return_point);
       }
     },
@@ -3708,11 +3791,14 @@ void exec(symbol_stmt_t::ptr stmt) {
       auto bcp = continue_point;
       break_point = inst("nop");
       continue_point = inst("nop");
+      auto start = inst("nop");
       exec(stmt->init);
-      lst.push_back(continue_point);
+      lst.push_back(start);
       exec(stmt->prelog);
       exec(stmt->body);
+      lst.push_back(continue_point);
       exec(stmt->epilog);
+      pinst("jz", reg_t(0), start);
       lst.push_back(break_point);
       break_point = bbp;
       continue_point = bcp;
@@ -3806,7 +3892,11 @@ bool codegen(std::ofstream& f) {
     if (errors_occurred) return false;
   }
   for (auto&& i : lst) i->set_pc(pc++);
-  for (auto&& i : lst) f << i->print() << std::endl;
+  for (auto&& i : elst) i->set_pc(pc++);
+  f << "main:" << std::endl;
+  for (auto&& i : lst) f << "  " << i->get_pc() << "  " << i->print() << std::endl;
+  f << "except:" << std::endl;
+  for (auto&& i : elst) f << "  " << i->get_pc() << "  " << i->print() << std::endl;
   return true;
 }
 
