@@ -24,7 +24,7 @@ extern vector[2708][16] node_forward_1;
 //                                    Y = W * X
 // since W (`layer1_weight_ex`, 46KB) fits well in the SPM (1MB), we will load whole W matrix directly,
 // and decompose X (`input_nodes_ex`, 7.8MB) into 150 nodes per slice.
-{
+
   vector[16][1433] layer1_weight;   // allocate 46KB SPM memory.
   layer1_weight = layer1_weight_ex; // load extern weight to SPM.
   {
@@ -52,7 +52,6 @@ extern vector[2708][16] node_forward_1;
         mm output_nodes[(i + 1) % 2], layer1_weight, input_nodes[(i + 1) % 2]; // matrix-mul intrinsic.
                           // ^----------------------------------------^-- opposite data of prefetch/write-back.
     }
-    output_nodes = output_nodes * 1;
     // | when the prefetch/write-back statements are exchanging data [i % 2],
     // | `mm` intrinsic can simutaneously operate on data [(i + 1) % 2].
     // | they will be executed concurrently on the processor. HIGH PERFORMANCE.
@@ -68,4 +67,4 @@ extern vector[2708][16] node_forward_1;
     mm output_nodes, layer1_weight, input_nodes;                // | to each other, they must wait for previous
     (extern vector[8][16])node_forward_1[2700] = output_nodes;  // | execution before start. LOW PERFORMANCE.
   }
-}
+  print typeof(layer1_weight);

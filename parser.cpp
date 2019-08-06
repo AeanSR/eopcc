@@ -1310,6 +1310,18 @@ struct exprstmt_t : public ast_node_t {
   }
 };
 
+struct builtin_t : public ast_node_t {
+  int opcode;
+  enum { CONV, MLP, POOL, CONCAT, SPLIT, GROUP_CONV, DEPTHWISE_CONV };
+  std::shared_ptr<arglist_t> args;
+
+  virtual bool _parse() {
+    return guard(expect_multikeys(opcode, CONV,
+        "EOPConvolution", "EOPFullyConnected", "EOPPooling", "EOPConcat", "EOPSplit", "EOPGroupConv", "EOPDepthwiseConv"
+      ) && expect_punc("(") && expect(args) && expect_punc(")") && expect_punc(";"));
+  }
+};
+
 struct compstmt_t : public ast_node_t {
   std::vector<std::shared_ptr<stmt_t>> stmts;
 
@@ -1318,6 +1330,10 @@ struct compstmt_t : public ast_node_t {
       if (expect_punc("{")) {
         decltype(stmts)::value_type stmt;
         while(expect(stmt)) stmts.push_back(stmt);
+        std::shared_ptr<builtin_t> builtin;
+        if (expect(builtin)) {
+          return syn_cursor--, upd_error("built-in library call must be global-scoped.");
+        }
         return expect_punc("}");
       }
       return false;
@@ -1335,18 +1351,6 @@ struct stmt_t : public ast_node_t {
 
   virtual bool _parse() {
     return expect(print_) || expect(intrin) || expect(ctrl) || expect(comp) || expect(decl) || expect(expr);
-  }
-};
-
-struct builtin_t : public ast_node_t {
-  int opcode;
-  enum { CONV, MLP, POOL, CONCAT, SPLIT, GROUP_CONV, DEPTHWISE_CONV };
-  std::shared_ptr<arglist_t> args;
-
-  virtual bool _parse() {
-    return guard(expect_multikeys(opcode, CONV,
-        "EOPConvolution", "EOPFullyConnected", "EOPPooling", "EOPConcat", "EOPSplit", "EOPGroupConv", "EOPDepthwiseConv"
-      ) && expect_punc("(") && expect(args) && expect_punc(")") && expect_punc(";"));
   }
 };
 
@@ -2023,6 +2027,7 @@ struct symbol_descope_t : public symbol_stmt_t {
 };
 
 std::list<std::unordered_map<std::string, symbol_t::ptr>> symbol_registry;
+std::unordered_map<std::string, symbol_t::ptr> symbol_history;
 #define scoped_lookup(name) [&]()->symbol_t::ptr{ for (auto&& scope : symbol_registry) if (name in scope) return scope[name]; return nullptr; }()
 
 template<class T, class R, class... Args>
@@ -2128,6 +2133,7 @@ symbol_t::ptr symbol_case_assign(std::shared_ptr<T> ast, symbol_t::ptr _rhs) {
 }
 
 bool is_in_except = false;
+bool is_in_tr_scope = true;
 
 struct function_instantiation_frame_t : public cursor_t {
   std::shared_ptr<symbol_func_type_t> func_type;
@@ -2169,7 +2175,14 @@ symbol_t::ptr prob(std::shared_ptr<ast_node_t> ast) {
       auto v = prob(ast->var);
       if (v is typeid(symbol_null_t)) {
         v->error() << "\"" << ast->var->name << "\" is not defined." << v->eol();
-        return std::make_shared<symbol_var_t>(ast, symbol_void_type_t::new_(ast), ast->var->name); // resume from void
+        if (ast->var->name in symbol_history) {
+          symbol_history[ast->var->name]->note() << "there was a symbol \"" << ast->var->name << "\" defined but obsoleted by a built-in library call. " <<
+                       "built-in library call will end the lifecycle of any intern variables." << symbol_history[ast->var->name]->eol();
+          symbol_history.erase(ast->var->name);
+        }
+        auto fake = std::make_shared<symbol_var_t>(ast, symbol_void_type_t::new_(ast), ast->var->name); // resume from void
+        symbol_registry.front()[ast->var->name] = fake;
+        return fake;
       }
       return v;
     },
@@ -2634,12 +2647,15 @@ symbol_t::ptr prob(std::shared_ptr<ast_node_t> ast) {
       }
       auto var = std::make_shared<symbol_var_t>(ast, type, name);
       auto current = scoped_lookup(name);
-      if (current) {
+      if (current && !(current is typeid(symbol_var_t) && current->to<symbol_var_t>()->type is typeid(symbol_void_type_t))) {
         if (!(current is typeid(symbol_var_t) || current is typeid(symbol_call_t))) {
           ast->error() << "declaration of variable conflicts with a non-variable symbol." << ast->eol();
-          current->note() << "previous declaration is from here:" << current->eol();
+          current->note() << "previous defined from here:" << current->eol();
         }
-        if (name in symbol_registry.front()) {
+        if (is_in_tr_scope && (type->external || type->const_)) {
+          ast->warn() << "external or const variables have global lifecycle. this will be hidden by an previous defined intern variable." << ast->eol();
+          current->note() << "previous defined from here:" << current->eol();
+        } else if (name in symbol_registry.front()) {
           auto previous = current->to<symbol_var_t>();
           if (previous) stmts->list.push_back(std::make_shared<symbol_free_t>(ast, previous));
         }
@@ -2648,6 +2664,7 @@ symbol_t::ptr prob(std::shared_ptr<ast_node_t> ast) {
         if (init) {
           if (init is typeid(symbol_call_t) && init->rvvalue()) {
             symbol_registry.front()[name] = init;
+            if (is_in_tr_scope) symbol_history[name] = var;
             stmts->list.push_back(std::make_shared<symbol_eval_t>(ast, init));
           } else if (init is typeid(symbol_call_t)) {
             init->error() << "exception handler must be initialized with an async function call. got sync function call." << ast->eol();
@@ -2675,7 +2692,9 @@ symbol_t::ptr prob(std::shared_ptr<ast_node_t> ast) {
           ast->warn() << "const variable default initialized to zero." << ast->eol();
           var->constval = (int64_t)0;
         }
-        symbol_registry.front()[name] = var;
+        auto& scope = is_in_tr_scope && (type->external || type->const_) ? symbol_registry.back() : symbol_registry.front();
+        scope[name] = var;
+        if (is_in_tr_scope && !(type->external || type->const_)) symbol_history[name] = var;
       }
 
       return stmts;
@@ -2686,13 +2705,17 @@ symbol_t::ptr prob(std::shared_ptr<ast_node_t> ast) {
       std::string name = ast->name;
       for (auto&& v : ast->args)
         args.push_back(v->var->name);
-      if (name in symbol_registry.front()) {
+      if (!is_in_tr_scope && name in symbol_registry.front()) {
         ast->warn() << "function definition hides previous defined symbol in current scope." << ast->eol();
-        symbol_registry.front()[name]->note() << "previous defined here:" << symbol_registry.front()[name]->eol();
+        symbol_registry.front()[name]->note() << "previous defined from here:" << symbol_registry.front()[name]->eol();
+      } else if (is_in_tr_scope && scoped_lookup(name) && !(name in symbol_registry.back())) {
+        ast->warn() << "global-scoped function definition hidden by previous defined symbol." << ast->eol();
+        scoped_lookup(name)->note() << "previous defined from here:" << scoped_lookup(name)->eol();
       }
       auto func_type = symbol_func_type_t::new_(ast, name, args);
       auto func = std::make_shared<symbol_func_t>(ast, func_type, ast->body);
-      symbol_registry.front()[name] = func;
+      if (is_in_tr_scope) symbol_registry.back()[name] = func;
+      else symbol_registry.front()[name] = func;
       return func;
     },
 
@@ -2700,6 +2723,8 @@ symbol_t::ptr prob(std::shared_ptr<ast_node_t> ast) {
       symbol_registry.emplace_front();
       auto stmts = std::make_shared<symbol_stmt_list_t>(ast);
       stmts->list.push_back(std::make_shared<symbol_enscope_t>(ast));
+      auto tr_scope_bk = is_in_tr_scope;
+      is_in_tr_scope = false;
       for (auto&& s : ast->stmts)
         stmts->list.push_back(prob(s)->to<symbol_stmt_t>());
       //for (auto&& kv : symbol_registry.front()) {
@@ -2708,6 +2733,7 @@ symbol_t::ptr prob(std::shared_ptr<ast_node_t> ast) {
       //}
       symbol_registry.pop_front();
       stmts->list.push_back(std::make_shared<symbol_descope_t>(ast));
+      is_in_tr_scope = tr_scope_bk;
       return stmts;
     },
 
@@ -3137,6 +3163,24 @@ symbol_t::ptr prob(std::shared_ptr<ast_node_t> ast) {
       if (ast->comp) return prob(ast->comp);
       if (ast->decl) return prob(ast->decl);
       return prob(ast->expr);
+    },
+
+    +[](std::shared_ptr<builtin_t> ast)->symbol_t::ptr {
+      auto arglist = prob(ast->args)->to<symbol_arglist_t>();
+      return arglist;
+    },
+
+    +[](std::shared_ptr<translation_unit_t> ast)->symbol_t::ptr {
+      is_in_tr_scope = true;
+      if (ast->builtin) return prob(ast->builtin);
+      symbol_registry.emplace_front();
+      auto stmts = std::make_shared<symbol_stmt_list_t>(ast);
+      stmts->list.push_back(std::make_shared<symbol_enscope_t>(ast));
+      for (auto&& s : ast->stmts)
+        stmts->list.push_back(prob(s)->to<symbol_stmt_t>());
+      stmts->list.push_back(std::make_shared<symbol_descope_t>(ast));
+      symbol_registry.pop_front();
+      return stmts;
     }
   );
 }
