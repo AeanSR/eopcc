@@ -35,9 +35,8 @@ std::set<std::string> keywords = {
   "sizeof", "typeof",
   "def", "async", "await", "except",
   "conv", "pool", "mm", "act", "trans", "cycleadd",
-  "int", "float", "vector", "extern", "intern", "const",
-  "EOPConvolution", "EOPFullyConnected", "EOPPooling", "EOPConcat", "EOPSplit",
-  "EOPGroupConv", "EOPDepthwiseConv"
+  "int", "float", "vector", "extern", "intern", "const", "null",
+  "EOPConvolution", "EOPFullyConnected", "EOPPooling", "EOPConcat", "EOPSplit", "EOPDepthwiseConv"
 };
 
 std::set<std::string> punctuators = {
@@ -252,8 +251,6 @@ struct token_t : public cursor_t {
     return ss.str();
   }
 };
-
-
 
 void read_source(const char* fn) {
   std::ifstream sf(fn);
@@ -622,6 +619,7 @@ struct ast_node_t : public cursor_t, std::enable_shared_from_this<ast_node_t> {
 };
 
 struct ident_t;
+struct null_t;
 struct expr_t;
 struct assignexpr_t;
 struct arglist_t;
@@ -663,6 +661,7 @@ struct vexpr_t;
 struct iexpr_t;
 struct fexpr_t;
 struct stmt_t;
+struct builtin_t;
 struct compstmt_t;
 struct ctrlstmt_t;
 struct forstmt_t;
@@ -702,6 +701,12 @@ struct vexpr_t : public ast_node_t {
   std::shared_ptr<ident_t> var;
   virtual bool _parse() {
     return expect(var);
+  }
+};
+
+struct null_t : public ast_node_t {
+  virtual bool _parse() {
+    return expect_key("null");
   }
 };
 
@@ -1312,12 +1317,12 @@ struct exprstmt_t : public ast_node_t {
 
 struct builtin_t : public ast_node_t {
   int opcode;
-  enum { CONV, MLP, POOL, CONCAT, SPLIT, GROUP_CONV, DEPTHWISE_CONV };
+  enum { CONV, MLP, POOL, CONCAT, SPLIT, DEPTHWISE_CONV };
   std::shared_ptr<arglist_t> args;
 
   virtual bool _parse() {
     return guard(expect_multikeys(opcode, CONV,
-        "EOPConvolution", "EOPFullyConnected", "EOPPooling", "EOPConcat", "EOPSplit", "EOPGroupConv", "EOPDepthwiseConv"
+        "EOPConvolution", "EOPFullyConnected", "EOPPooling", "EOPConcat", "EOPSplit", "EOPDepthwiseConv"
       ) && expect_punc("(") && expect(args) && expect_punc(")") && expect_punc(";"));
   }
 };
@@ -1394,11 +1399,6 @@ struct symbol_t : public cursor_t, std::enable_shared_from_this<symbol_t> {
   std::shared_ptr<T> to() {
     return std::dynamic_pointer_cast<T>(this ? shared_from_this() : nullptr);
   }
-};
-
-struct symbol_null_t : public symbol_t {
-  std::string name;
-  symbol_null_t(ast_node_t::ptr cur, std::string name) : symbol_t(cur), name(name) { }
 };
 
 struct symbol_type_t : public symbol_t {
@@ -1578,6 +1578,13 @@ struct symbol_array_type_t : public symbol_type_t {
   }
   virtual ptr intern(bool ex=false) const { return nullptr; }
   virtual ptr constant(bool co=false) const { return nullptr; }
+};
+
+struct symbol_null_t : public symbol_val_t {
+  symbol_null_t(ast_node_t::ptr cur) : symbol_val_t(cur, symbol_void_type_t::new_()) { }
+  virtual simval_t constexpr_eval() const { return (int64_t)0; }
+  virtual bool lvalue() const { return false; }
+  virtual bool rvvalue() const { return false; }
 };
 
 struct symbol_var_t : public symbol_val_t {
@@ -1970,7 +1977,7 @@ struct symbol_cycleadd_t : public symbol_stmt_t {
 
 struct symbol_builtin_conv_t : public symbol_stmt_t {
   int operator_type;
-  enum { CONV, MLP, GROUP_CONV, DEPTHWISE_CONV };
+  enum { CONV, MLP, DEPTHWISE_CONV };
   symbol_val_t::ptr dest;
   symbol_val_t::ptr weight;
   symbol_val_t::ptr input;
@@ -2158,13 +2165,17 @@ void rewind_function_instantiation_stack() {
 
 symbol_t::ptr prob(std::shared_ptr<ast_node_t> ast) {
   verbose( 3, null_ast()->note() << "prob symbol tree of " << (ast ? typeid(*ast).name() : "nullptr") << (ast ? ast : null_ast())->eol() );
-  if (!ast) return std::make_shared<symbol_null_t>(null_ast(), ""s);
+  if (!ast) return std::make_shared<symbol_null_t>(null_ast());
   return typeswitch(ast, 
 
     +[](std::shared_ptr<ident_t> ast)->symbol_t::ptr {
       auto lu = scoped_lookup(ast->name);
       if (lu) return lu;
-      return std::make_shared<symbol_null_t>(ast, ast->name);
+      return std::make_shared<symbol_null_t>(ast);
+    },
+
+    +[](std::shared_ptr<null_t> ast)->symbol_t::ptr {
+      return std::make_shared<symbol_null_t>(ast);
     },
 
     +[](std::shared_ptr<sexpr_t> ast)->symbol_t::ptr {
@@ -2235,7 +2246,7 @@ symbol_t::ptr prob(std::shared_ptr<ast_node_t> ast) {
       bool async = ast->async;
       if (async && is_in_except) {
         ast->error() << "cannot make async function calls from another async function call." << ast->eol();
-        return std::make_shared<symbol_null_t>(ast, "<invalid-async-call>");
+        return std::make_shared<symbol_null_t>(ast);
       }
       auto lhs = prob(ast->lhs)->to<symbol_func_t>();
       auto func = lhs ? lhs->type->to<symbol_func_type_t>() : nullptr;
@@ -3167,6 +3178,51 @@ symbol_t::ptr prob(std::shared_ptr<ast_node_t> ast) {
 
     +[](std::shared_ptr<builtin_t> ast)->symbol_t::ptr {
       auto arglist = prob(ast->args)->to<symbol_arglist_t>();
+      std::string usage;
+
+      switch(ast->opcode) {
+        case builtin_t::CONV: {
+          usage = "usage: EOPConvolution(extern vector[NHWC/HWC] dest, extern vector[NHWC] kernel, extern vector[NHWC/HWC] input, extern vector[C] bias, const int stride_x = 1, const int stride_y, const int pad_x, const int pad_y);";
+          if (arglist->args.size() != 8) {
+            ast->error() << "expect 8 args, got " << arglist->args.size() << ast->eol();
+            ast->note() << usage << ast->eol();
+            break;
+          }
+          auto sym = std::make_shared<symbol_builtin_conv_t>(ast);
+          sym->operator_type = symbol_builtin_conv_t::CONV;
+          sym->dest = arglist->args[0];
+          sym->weight = arglist->args[1];
+          sym->input = arglist->args[2];
+          sym->bias = arglist->args[3]; if (sym->bias is typeid(symbol_null_t)) sym->bias = nullptr;
+          auto dest_type = sym->dest->type->to<symbol_vec_type_t>();
+          auto weight_type = sym->weight->type->to<symbol_vec_type_t>();
+          auto input_type = sym->input->type->to<symbol_vec_type_t>();
+          auto bias_type = sym->bias ? sym->bias->type->to<symbol_vec_type_t>() : nullptr;
+          if (!dest_type || !weight_type || !input_type || (sym->bias && !bias_type)) {
+            sym->dest->error() << "expect extern vector on 1,2,3,4-th args." << ast->eol();
+            ast->note() << usage << ast->eol();
+            break; 
+          }
+          sym->bt = dest_type->size.size() == 4 ? dest_type->size[3] : 1;
+          sym->fi = weight_type->size[0];
+          sym->fo = weight_type->size[3];
+          sym->kx = weight_type->size[1];
+          sym->ky = weight_type->size[2];
+          sym->xi = input_type->size[1];
+          sym->yi = input_type->size[2];
+          try {
+            sym->sx = std::get<int64_t>(arglist->args[4]->constexpr_eval());
+            sym->sy = std::get<int64_t>(arglist->args[5]->constexpr_eval());
+            sym->px = std::get<int64_t>(arglist->args[6]->constexpr_eval());
+            sym->py = std::get<int64_t>(arglist->args[7]->constexpr_eval());
+          } catch(...) {
+            ast->error() << "expect const int on 5,6,7,8-th args." << ast->eol();
+            ast->note() << usage << ast->eol();
+            break;
+          }
+          return sym;
+        }
+      }
       return arglist;
     },
 
