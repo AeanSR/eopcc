@@ -1310,6 +1310,18 @@ struct exprstmt_t : public ast_node_t {
   }
 };
 
+struct builtin_t : public ast_node_t {
+  int opcode;
+  enum { CONV, MLP, POOL, CONCAT, SPLIT, GROUP_CONV, DEPTHWISE_CONV };
+  std::shared_ptr<arglist_t> args;
+
+  virtual bool _parse() {
+    return guard(expect_multikeys(opcode, CONV,
+        "EOPConvolution", "EOPFullyConnected", "EOPPooling", "EOPConcat", "EOPSplit", "EOPGroupConv", "EOPDepthwiseConv"
+      ) && expect_punc("(") && expect(args) && expect_punc(")") && expect_punc(";"));
+  }
+};
+
 struct compstmt_t : public ast_node_t {
   std::vector<std::shared_ptr<stmt_t>> stmts;
 
@@ -1318,6 +1330,10 @@ struct compstmt_t : public ast_node_t {
       if (expect_punc("{")) {
         decltype(stmts)::value_type stmt;
         while(expect(stmt)) stmts.push_back(stmt);
+        std::shared_ptr<builtin_t> builtin;
+        if (expect(builtin)) {
+          return syn_cursor--, upd_error("built-in library call must be global-scoped.");
+        }
         return expect_punc("}");
       }
       return false;
@@ -1335,18 +1351,6 @@ struct stmt_t : public ast_node_t {
 
   virtual bool _parse() {
     return expect(print_) || expect(intrin) || expect(ctrl) || expect(comp) || expect(decl) || expect(expr);
-  }
-};
-
-struct builtin_t : public ast_node_t {
-  int opcode;
-  enum { CONV, MLP, POOL, CONCAT, SPLIT, GROUP_CONV, DEPTHWISE_CONV };
-  std::shared_ptr<arglist_t> args;
-
-  virtual bool _parse() {
-    return guard(expect_multikeys(opcode, CONV,
-        "EOPConvolution", "EOPFullyConnected", "EOPPooling", "EOPConcat", "EOPSplit", "EOPGroupConv", "EOPDepthwiseConv"
-      ) && expect_punc("(") && expect(args) && expect_punc(")") && expect_punc(";"));
   }
 };
 
