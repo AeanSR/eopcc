@@ -1,5 +1,4 @@
-int a[10];
-int b;
-int i;
-for (i = 0; i < 10; i++)
-  a[i] = i;
+extern vector[224][224][3] image;
+extern vector[64][3][3][3] weight;
+extern vector[224][224][64] output;
+EOPConvolution(output, weight, image, null, 1, 1, 1, 1);
