@@ -737,8 +737,9 @@ struct pexpr_t : public ast_node_t {
   std::shared_ptr<vexpr_t> v;
   std::shared_ptr<iexpr_t> i;
   std::shared_ptr<fexpr_t> f;
+  std::shared_ptr<null_t> n;
   virtual bool _parse() {
-    return expect(s) || expect(v) || expect(i) || expect(f) ||
+    return expect(n) || expect(s) || expect(v) || expect(i) || expect(f) ||
            guard(expect_punc("(") && expect(e) && expect_punc(")"));
   }
 };
@@ -1424,6 +1425,10 @@ struct symbol_val_t : public symbol_t {
   virtual bool lvalue() const { return false; }
   virtual bool rvvalue() const { return false; }
   symbol_val_t(ast_node_t::ptr cur, symbol_type_t::ptr type) : symbol_t(cur), type(type) { }
+};
+
+struct symbol_error_t : public symbol_t {
+  symbol_error_t(ast_node_t::ptr cur) : symbol_t(cur) { }
 };
 
 struct symbol_stmt_t : public symbol_t {
@@ -2165,7 +2170,7 @@ void rewind_function_instantiation_stack() {
 
 symbol_t::ptr prob(std::shared_ptr<ast_node_t> ast) {
   verbose( 3, null_ast()->note() << "prob symbol tree of " << (ast ? typeid(*ast).name() : "nullptr") << (ast ? ast : null_ast())->eol() );
-  if (!ast) return std::make_shared<symbol_null_t>(null_ast());
+  if (!ast) return std::make_shared<symbol_error_t>(null_ast());
   return typeswitch(ast, 
 
     +[](std::shared_ptr<ident_t> ast)->symbol_t::ptr {
@@ -2207,6 +2212,7 @@ symbol_t::ptr prob(std::shared_ptr<ast_node_t> ast) {
     },
 
     +[](std::shared_ptr<pexpr_t> ast)->symbol_t::ptr {
+      if (ast->n) return prob(ast->n);
       if (ast->s) return prob(ast->s);
       if (ast->v) return prob(ast->v);
       if (ast->i) return prob(ast->i);
@@ -2580,7 +2586,7 @@ symbol_t::ptr prob(std::shared_ptr<ast_node_t> ast) {
         } return 0;
       };
       rvck(lhs); 
-      return std::make_shared<symbol_arglist_t>(ast, prob(ast->lhs)->to<symbol_val_t>(), prob(ast->rhs)->to<symbol_val_t>());
+      return std::make_shared<symbol_arglist_t>(ast, lhs, prob(ast->rhs)->to<symbol_val_t>());
     },
 
     +[](std::shared_ptr<printstmt_t> ast)->symbol_t::ptr {
