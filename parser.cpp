@@ -4083,10 +4083,6 @@ void exec(symbol_stmt_t::ptr stmt) {
         exec(stmt);
       }
 
-      else if(stmt->operator_type == symbol_builtin_conv_t::GROUP_CONV) {
-
-      }
-
       else if(stmt->operator_type == symbol_builtin_conv_t::DEPTHWISE_CONV) {
 
       }
