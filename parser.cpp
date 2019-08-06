@@ -1531,7 +1531,7 @@ struct symbol_func_type_t : public symbol_fundamental_type_t {
 struct symbol_array_type_t : public symbol_type_t {
   int64_t size;
   symbol_type_t::ptr elem_type;
-  symbol_array_type_t(symbol_type_t::ptr elem_type, int64_t size) : symbol_type_t(*elem_type), elem_type(elem_type), size(size) {}
+  symbol_array_type_t(symbol_type_t::ptr elem_type, int64_t size) : symbol_type_t(*std::static_pointer_cast<symbol_type_t>(elem_type)), elem_type(elem_type), size(size) {}
   virtual int64_t sizeof_() const {
     return elem_type->sizeof_() * size;
   }
@@ -2177,7 +2177,8 @@ symbol_t::ptr prob(std::shared_ptr<ast_node_t> ast) {
         for (size_t i = 0; i < std::min(vargs.size(), func->args.size()); i++) {
           rvck(vargs[i]);
           symbol_val_t::ptr param = vargs[i];
-          if (!param->lvalue()) {
+          if (param->constexpr_eval().index()) {
+          } else if (!param->lvalue()) {
             param = std::make_shared<symbol_var_t>(ast, param->type, func->args[i]);
             stmts->list.push_back(std::make_shared<symbol_alloc_t>(ast, param->to<symbol_var_t>()));
             auto assign = std::make_shared<fake_assign_t>();
@@ -2538,7 +2539,6 @@ symbol_t::ptr prob(std::shared_ptr<ast_node_t> ast) {
       std::vector<int64_t> size;
       auto init = prob(ast->init)->to<symbol_val_t>();
       auto stmts = std::make_shared<symbol_stmt_list_t>(ast);
-      auto var = std::make_shared<symbol_var_t>(ast, type, name);
       for (auto&& s : ast->size) {
         auto ss = prob(s)->to<symbol_val_t>();
         try {
@@ -2556,6 +2556,7 @@ symbol_t::ptr prob(std::shared_ptr<ast_node_t> ast) {
       for (auto&& s : size) {
         type = std::make_shared<symbol_array_type_t>(type, s);
       }
+      auto var = std::make_shared<symbol_var_t>(ast, type, name);
       auto current = scoped_lookup(name);
       if (current) {
         if (!(current is typeid(symbol_var_t) || current is typeid(symbol_call_t))) {
@@ -3859,7 +3860,7 @@ void exec(symbol_stmt_t::ptr stmt) {
       pinst("mm", res, wt, im, tr, fi, ni, fo, bt);
     },
 
-    +[](std::shared_ptr<symbol_mm_t> stmt) {
+    +[](std::shared_ptr<symbol_act_t> stmt) {
       auto res = std::get<addr_t::ptr>(eval(stmt->result));
       auto im = std::get<addr_t::ptr>(eval(stmt->input));
       int64_t n = stmt->input->type->sizeof_();
