@@ -52,6 +52,7 @@ extern vector[2708][16] node_forward_1;
         mm output_nodes[(i + 1) % 2], layer1_weight, input_nodes[(i + 1) % 2]; // matrix-mul intrinsic.
                           // ^----------------------------------------^-- opposite data of prefetch/write-back.
     }
+    output_nodes = output_nodes * 1;
     // | when the prefetch/write-back statements are exchanging data [i % 2],
     // | `mm` intrinsic can simutaneously operate on data [(i + 1) % 2].
     // | they will be executed concurrently on the processor. HIGH PERFORMANCE.

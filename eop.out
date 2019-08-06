@@ -1,0 +1,21 @@
+main:
+  0  movis r1 #0
+  1  stores ptr/#88 r1
+  2  nop
+  3  loads r2 ptr/#88
+  4  movis r4 #10
+  5  lti r2 r2 r4
+  6  eqi r5 r0 r2
+  7  jz r5 !18
+  8  loads r6 ptr/#88
+  9  muli r6 r6 #8
+  10  addi r7 r6 #0
+  11  loads r8 ptr/#88
+  12  stores ptr/r7 r8
+  13  nop
+  14  loads r9 ptr/#88
+  15  addi r10 r9 #1
+  16  stores ptr/#88 r10
+  17  jz r0 !2
+  18  nop
+except:

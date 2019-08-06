@@ -35,7 +35,9 @@ std::set<std::string> keywords = {
   "sizeof", "typeof",
   "def", "async", "await", "except",
   "conv", "pool", "mm", "act", "trans", "cycleadd",
-  "int", "float", "vector", "extern", "intern", "const"
+  "int", "float", "vector", "extern", "intern", "const",
+  "EOPConvolution", "EOPFullyConnected", "EOPPooling", "EOPConcat", "EOPSplit",
+  "EOPGroupConv", "EOPDepthwiseConv"
 };
 
 std::set<std::string> punctuators = {
@@ -1336,12 +1338,36 @@ struct stmt_t : public ast_node_t {
   }
 };
 
-std::vector<std::shared_ptr<stmt_t>> ast;
+struct builtin_t : public ast_node_t {
+  int opcode;
+  enum { CONV, MLP, POOL, CONCAT, SPLIT, GROUP_CONV, DEPTHWISE_CONV };
+  std::shared_ptr<arglist_t> args;
+
+  virtual bool _parse() {
+    return guard(expect_multikeys(opcode, CONV,
+        "EOPConvolution", "EOPFullyConnected", "EOPPooling", "EOPConcat", "EOPSplit", "EOPGroupConv", "EOPDepthwiseConv"
+      ) && expect_punc("(") && expect(args) && expect_punc(")") && expect_punc(";"));
+  }
+};
+
+struct translation_unit_t : public ast_node_t {
+  std::vector<std::shared_ptr<stmt_t>> stmts;
+  std::shared_ptr<builtin_t> builtin;
+
+  virtual bool _parse() {
+    if (expect(builtin)) return true;
+    decltype(stmts)::value_type stmt;
+    while(expect(stmt)) stmts.push_back(stmt);
+    return !stmts.empty();
+  }
+};
+
+std::vector<std::shared_ptr<translation_unit_t>> ast;
 
 bool parser() {
-  std::shared_ptr<stmt_t> stmt;
-  while(expect(stmt)) {
-    ast.push_back(stmt);
+  std::shared_ptr<translation_unit_t> tru;
+  while(expect(tru)) {
+    ast.push_back(tru);
     syntr.clear();
   }
   if (tokens[syn_cursor].type != token_t::NIT) {
@@ -1936,6 +1962,56 @@ struct symbol_cycleadd_t : public symbol_stmt_t {
   symbol_val_t::ptr bigger;
   symbol_val_t::ptr smaller;
   symbol_cycleadd_t(ast_node_t::ptr ast, symbol_val_t::ptr result, symbol_val_t::ptr bigger, symbol_val_t::ptr smaller) : symbol_stmt_t(ast), result(result), bigger(bigger), smaller(smaller) { }
+};
+
+struct symbol_builtin_conv_t : public symbol_stmt_t {
+  int operation_type;
+  enum { CONV, MLP, GROUP_CONV, DEPTHWISE_CONV };
+  symbol_val_t::ptr dest;
+  symbol_val_t::ptr weight;
+  symbol_val_t::ptr input;
+  symbol_val_t::ptr bias;
+  std::vector<symbol_val_t::ptr> group; // split dest, concat source, group conv kernel.
+  int64_t bt;
+  int64_t fi;
+  int64_t fo;
+  int64_t kx;
+  int64_t ky;
+  int64_t xi;
+  int64_t yi;
+  int64_t sx;
+  int64_t sy;
+  int64_t px;
+  int64_t py;
+  symbol_builtin_conv_t(ast_node_t::ptr ast) : symbol_stmt_t(ast) { }
+};
+
+struct symbol_builtin_pool_t : public symbol_stmt_t {
+  int operation_type;
+  enum { POOL, };
+  symbol_val_t::ptr dest;
+  symbol_val_t::ptr input;
+  int64_t bt;
+  int64_t fi;
+  int64_t fo;
+  int64_t kx;
+  int64_t ky;
+  int64_t xi;
+  int64_t yi;
+  int64_t sx;
+  int64_t sy;
+  int64_t px;
+  int64_t py;
+  symbol_builtin_pool_t(ast_node_t::ptr ast) : symbol_stmt_t(ast) { }
+};
+
+struct symbol_builtin_concatsplit_t : public symbol_stmt_t {
+  int operation_type;
+  enum { CONCAT, SPLIT };
+  std::vector<symbol_val_t::ptr> group;
+  symbol_val_t::ptr other;
+  int64_t bt;
+  symbol_builtin_concatsplit_t(ast_node_t::ptr ast) : symbol_stmt_t(ast) { }
 };
 
 struct symbol_enscope_t : public symbol_stmt_t {
