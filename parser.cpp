@@ -2003,7 +2003,7 @@ struct symbol_builtin_conv_t : public symbol_stmt_t {
 };
 
 struct symbol_builtin_pool_t : public symbol_stmt_t {
-  int operation_type;
+  int operator_type;
   enum { POOL, };
   symbol_val_t::ptr dest;
   symbol_val_t::ptr input;
@@ -4207,7 +4207,7 @@ void exec(symbol_stmt_t::ptr stmt) {
         int64_t xo = (xi + 2*px - kx + sx) / sx;
         int64_t yo = (yi + 2*py - ky + sy) / sy;
         if(fi != fo) {
-          printf("deepthwise parameter error!\n");
+          printf("parser.cpp: fi!=fo, deepthwise parameter error!\n");
           exit(0);
         }
         // data_size: 2byte
@@ -4319,6 +4319,69 @@ void exec(symbol_stmt_t::ptr stmt) {
                   pinst("storev", dst->offset(2*((bt-1)*fo*xo*yo + x_idx*yo*fo + y_idx*fo + f_idx)), res0_addr->offset(2*(f_idx*xo*yo + x_idx*yo + y_idx)), (int64_t)2);  
         }
 
+      }
+    },
+
+    +[](std::shared_ptr<symbol_builtin_pool_t> stmt) {
+      if(stmt->operator_type == symbol_builtin_pool_t::POOL) {
+        auto dst = std::get<addr_t::ptr>(eval(stmt->dest));
+        auto src = std::get<addr_t::ptr>(eval(stmt->input));
+        int64_t bt = stmt->bt;
+        int64_t xi = stmt->xi;
+        int64_t yi = stmt->yi;
+        int64_t fi = stmt->fi;
+        int64_t kx = stmt->kx;
+        int64_t ky = stmt->ky;
+        int64_t sx = stmt->sx;
+        int64_t sy = stmt->sy;
+        int64_t px = stmt->px;
+        int64_t py = stmt->py;
+        int64_t xo = (xi + 2*px - kx + sx) / sx;
+        int64_t yo = (yi + 2*py - ky + sy) / sy;
+        // data_size: 2byte
+        int64_t total_size;
+        total_size = 2*fi*xi*yi + 2*fi*xo*yo;
+        if(2*total_size > 1048576) {
+          printf("too large to handle!\n");
+          exit(0);
+        }
+
+        //pinst("pool", res, im, fi, kx, ky, sx, sy, xi, yi, bt, stmt->pad_x, stmt->pad_y);
+        addr_t::ptr neu0_addr = std::make_shared<addr_t>(stmt, 1, 2*(0                    ), 2*fi*xi*yi);
+        addr_t::ptr neu1_addr = std::make_shared<addr_t>(stmt, 1, 2*(fi*xi*yi             ), 2*fi*xi*yi);
+        addr_t::ptr res0_addr = std::make_shared<addr_t>(stmt, 1, 2*(2*fi*xi*yi           ), 2*fi*xo*yo);
+        addr_t::ptr res1_addr = std::make_shared<addr_t>(stmt, 1, 2*(2*fi*xi*yi + fi*xo*yo), 2*fi*xo*yo);
+
+        for(int iter = 0; iter < bt/2; iter++) {
+          // load neu0
+          pinst("loadv", neu0_addr, src->offset(2*(2*iter+0)*fi*xi*yi), 2*fi*xi*yi);  
+
+          // load neu1
+          pinst("loadv", neu1_addr, src->offset(2*(2*iter+1)*fi*xi*yi), 2*fi*xi*yi);  
+
+          // pool0
+          pinst("pool", res0_addr, neu0_addr, fi, kx, ky, sx, sy, xi, yi, (int64_t)1, px, py);
+                                                                  
+          // pool1                                                
+          pinst("pool", res1_addr, neu1_addr, fi, kx, ky, sx, sy, xi, yi, (int64_t)1, px, py);
+
+          // store res0
+          pinst("storev", dst->offset(2*(2*iter+0)*fi*xo*yo), res0_addr, 2*fi*xo*yo);  
+
+          // store res1
+          pinst("storev", dst->offset(2*(2*iter+1)*fi*xo*yo), res1_addr, 2*fi*xo*yo);  
+        }
+
+        if(bt%2) {
+          // load neu0
+          pinst("loadv", neu0_addr, src->offset(2*(bt-1)*fi*xi*yi), 2*fi*xi*yi);  
+
+          // pool0
+          pinst("pool", res0_addr, neu0_addr, fi, kx, ky, sx, sy, xi, yi, (int64_t)1, px, py);
+
+          // store res0
+          pinst("storev", dst->offset(2*(bt-1)*fi*xo*yo), res0_addr, 2*fi*xo*yo);  
+        }
       }
     }
   );
