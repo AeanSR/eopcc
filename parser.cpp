@@ -4206,6 +4206,7 @@ void exec(symbol_stmt_t::ptr stmt) {
         int64_t py = stmt->py;
         int64_t xo = (xi + 2*px - kx + sx) / sx;
         int64_t yo = (yi + 2*py - ky + sy) / sy;
+        int64_t tmp_size = (fi*xi*yi > fo*xo*yo) ? fi*xi*yi : fo*xo*yo;
         if(fi != fo) {
           printf("parser.cpp: fi!=fo, deepthwise parameter error!\n");
           exit(0);
@@ -4213,9 +4214,9 @@ void exec(symbol_stmt_t::ptr stmt) {
         // data_size: 2byte
         int64_t total_size;
         if(stmt->bias != NULL)
-          total_size = fi*kx*ky + fo + 2*fi*xi*yi + 4*fo*xo*yo;
+          total_size = fi*kx*ky + fo + 2*fi*xi*yi + 4*fo*xo*yo + tmp_size;
         else
-          total_size = fi*kx*ky + 2*fi*xi*yi + 2*fo*xo*yo;
+          total_size = fi*kx*ky + 2*fi*xi*yi + 2*fo*xo*yo + tmp_size;
         if(2*total_size > 1048576) {
           printf("too large to handle!\n");
           exit(0);
@@ -4230,32 +4231,44 @@ void exec(symbol_stmt_t::ptr stmt) {
         addr_t::ptr bia_addr     ; 
         addr_t::ptr bia_res0_addr; 
         addr_t::ptr bia_res1_addr; 
+        addr_t::ptr tmp_addr; 
         if(stmt->bias != NULL) {
           bia_addr      = std::make_shared<addr_t>(stmt, 1, 2*(fi*kx*ky + 2*fi*xi*yi + 2*fo*xo*yo     ), 2*fo);
           bia_res0_addr = std::make_shared<addr_t>(stmt, 1, 2*(fi*kx*ky + 2*fi*xi*yi + 2*fo*xo*yo + fo), 2*fo*xo*yo);
           bia_res1_addr = std::make_shared<addr_t>(stmt, 1, 2*(fi*kx*ky + 2*fi*xi*yi + 3*fo*xo*yo + fo), 2*fo*xo*yo);
+          tmp_addr      = std::make_shared<addr_t>(stmt, 1, 2*(fi*kx*ky + 2*fi*xi*yi + 4*fo*xo*yo + fo), 2*tmp_size);
 
           // load bias
           pinst("loadv", bia_addr, bia, 2*fo);  
         }
+        else
+          tmp_addr      = std::make_shared<addr_t>(stmt, 1, 2*(fi*kx*ky + 2*fi*xi*yi + fo*xo*yo), 2*tmp_size);
+
         // load weight (h, w, c) -> (c, h, w)
-        for(int f_idx = 0; f_idx < fi; f_idx++)
-          for(int x_idx = 0; x_idx < kx; x_idx++)
-            for(int y_idx = 0; y_idx < ky; y_idx++)
-              pinst("loadv", syn_addr->offset(2*(f_idx*kx*ky + x_idx*ky + y_idx)), syn->offset(2*(x_idx*fi*ky + y_idx*fi + f_idx)), (int64_t)2);  
+        pinst("loadv", tmp_addr, syn, 2*fi*kx*ky);  
+        pinst("trans", syn_addr, tmp_addr, kx*ky, fi);  
+
+        //for(int f_idx = 0; f_idx < fi; f_idx++)
+        //  for(int x_idx = 0; x_idx < kx; x_idx++)
+        //    for(int y_idx = 0; y_idx < ky; y_idx++)
+        //      pinst("loadv", syn_addr->offset(2*(f_idx*kx*ky + x_idx*ky + y_idx)), syn->offset(2*(x_idx*fi*ky + y_idx*fi + f_idx)), (int64_t)2);  
 
         for(int iter = 0; iter < bt/2; iter++) {
           // load neu0 (h, w, c) -> (c, h, w)
-          for(int f_idx = 0; f_idx < fi; f_idx++)
-            for(int x_idx = 0; x_idx < xi; x_idx++)
-              for(int y_idx = 0; y_idx < yi; y_idx++)
-                pinst("loadv", neu0_addr->offset(2*(f_idx*xi*yi + x_idx*yi + y_idx)), neu->offset(2*((2*iter+0)*fi*xi*yi + x_idx*fi*yi + y_idx*fi + f_idx)), (int64_t)2);  
+          pinst("loadv", tmp_addr, neu->offset(2*(2*iter+0)*fi*xi*yi), 2*fi*xi*yi);  
+          pinst("trans", neu0_addr, tmp_addr, xi*yi, fi);  
+          //for(int f_idx = 0; f_idx < fi; f_idx++)
+          //  for(int x_idx = 0; x_idx < xi; x_idx++)
+          //    for(int y_idx = 0; y_idx < yi; y_idx++)
+          //      pinst("loadv", neu0_addr->offset(2*(f_idx*xi*yi + x_idx*yi + y_idx)), neu->offset(2*((2*iter+0)*fi*xi*yi + x_idx*fi*yi + y_idx*fi + f_idx)), (int64_t)2);  
 
           // load neu1 (h, w, c) -> (c, h, w)
-          for(int f_idx = 0; f_idx < fi; f_idx++)
-            for(int x_idx = 0; x_idx < xi; x_idx++)
-              for(int y_idx = 0; y_idx < yi; y_idx++)
-                pinst("loadv", neu1_addr->offset(2*(f_idx*xi*yi + x_idx*yi + y_idx)), neu->offset(2*((2*iter+1)*fi*xi*yi + x_idx*fi*yi + y_idx*fi + f_idx)), (int64_t)2);  
+          pinst("loadv", tmp_addr, neu->offset(2*(2*iter+1)*fi*xi*yi), 2*fi*xi*yi);  
+          pinst("trans", neu1_addr, tmp_addr, xi*yi, fi);  
+          //for(int f_idx = 0; f_idx < fi; f_idx++)
+          //  for(int x_idx = 0; x_idx < xi; x_idx++)
+          //    for(int y_idx = 0; y_idx < yi; y_idx++)
+          //      pinst("loadv", neu1_addr->offset(2*(f_idx*xi*yi + x_idx*yi + y_idx)), neu->offset(2*((2*iter+1)*fi*xi*yi + x_idx*fi*yi + y_idx*fi + f_idx)), (int64_t)2);  
 
           // conv0 for each channel
           for(int f_idx = 0; f_idx < fo; f_idx++) {
@@ -4274,32 +4287,45 @@ void exec(symbol_stmt_t::ptr stmt) {
           }
 
           // store res0 (c, h, w) -> (h, w, c)
-          for(int x_idx = 0; x_idx < xo; x_idx++)
-            for(int y_idx = 0; y_idx < yo; y_idx++)
-              for(int f_idx = 0; f_idx < fo; f_idx++)
-                if(stmt->bias != NULL)
-                  pinst("storev", dst->offset(2*((2*iter+0)*fo*xo*yo + x_idx*yo*fo + y_idx*fo + f_idx)), bia_res0_addr->offset(2*(f_idx*xo*yo + x_idx*yo + y_idx)), (int64_t)2);  
-                else
-                  pinst("storev", dst->offset(2*((2*iter+0)*fo*xo*yo + x_idx*yo*fo + y_idx*fo + f_idx)), res0_addr->offset(2*(f_idx*xo*yo + x_idx*yo + y_idx)), (int64_t)2);  
+          if(stmt->bias != NULL) {
+            pinst("trans", tmp_addr, bia_res0_addr, fo, xo*yo);  
+            pinst("storev", dst->offset((2*iter+0)*2*fo*xo*yo), tmp_addr, 2*fo*xo*yo);  
+          }
+          else {
+            pinst("trans", tmp_addr, res0_addr, fo, xo*yo);  
+            pinst("storev", dst->offset((2*iter+0)*2*fo*xo*yo), tmp_addr, 2*fo*xo*yo);  
+          }
+          //for(int x_idx = 0; x_idx < xo; x_idx++)
+          //  for(int y_idx = 0; y_idx < yo; y_idx++)
+          //    for(int f_idx = 0; f_idx < fo; f_idx++)
+          //      if(stmt->bias != NULL)
+          //        pinst("storev", dst->offset(2*((2*iter+0)*fo*xo*yo + x_idx*yo*fo + y_idx*fo + f_idx)), bia_res0_addr->offset(2*(f_idx*xo*yo + x_idx*yo + y_idx)), (int64_t)2);  
+          //      else
+          //        pinst("storev", dst->offset(2*((2*iter+0)*fo*xo*yo + x_idx*yo*fo + y_idx*fo + f_idx)), res0_addr->offset(2*(f_idx*xo*yo + x_idx*yo + y_idx)), (int64_t)2);  
 
 
           // store res1 (c, h, w) -> (h, w, c)
-          for(int x_idx = 0; x_idx < xo; x_idx++)
-            for(int y_idx = 0; y_idx < yo; y_idx++)
-              for(int f_idx = 0; f_idx < fo; f_idx++)
-                if(stmt->bias != NULL)
-                  pinst("storev", dst->offset(2*((2*iter+1)*fo*xo*yo + x_idx*yo*fo + y_idx*fo + f_idx)), bia_res1_addr->offset(2*(f_idx*xo*yo + x_idx*yo + y_idx)), (int64_t)2);  
-                else
-                  pinst("storev", dst->offset(2*((2*iter+1)*fo*xo*yo + x_idx*yo*fo + y_idx*fo + f_idx)), res1_addr->offset(2*(f_idx*xo*yo + x_idx*yo + y_idx)), (int64_t)2);  
-
+          if(stmt->bias != NULL) {
+            pinst("trans", tmp_addr, bia_res1_addr, fo, xo*yo);  
+            pinst("storev", dst->offset((2*iter+1)*2*fo*xo*yo), tmp_addr, 2*fo*xo*yo);  
+          }
+          else {
+            pinst("trans", tmp_addr, res1_addr, fo, xo*yo);  
+            pinst("storev", dst->offset((2*iter+1)*2*fo*xo*yo), tmp_addr, 2*fo*xo*yo);  
+          }
+          //for(int x_idx = 0; x_idx < xo; x_idx++)
+          //  for(int y_idx = 0; y_idx < yo; y_idx++)
+          //    for(int f_idx = 0; f_idx < fo; f_idx++)
+          //      if(stmt->bias != NULL)
+          //        pinst("storev", dst->offset(2*((2*iter+1)*fo*xo*yo + x_idx*yo*fo + y_idx*fo + f_idx)), bia_res1_addr->offset(2*(f_idx*xo*yo + x_idx*yo + y_idx)), (int64_t)2);  
+          //      else
+          //        pinst("storev", dst->offset(2*((2*iter+1)*fo*xo*yo + x_idx*yo*fo + y_idx*fo + f_idx)), res1_addr->offset(2*(f_idx*xo*yo + x_idx*yo + y_idx)), (int64_t)2);  
         }
 
         if(bt%2) {
           // load neu0 (h, w, c) -> (c, h, w)
-          for(int f_idx = 0; f_idx < fi; f_idx++)
-            for(int x_idx = 0; x_idx < xi; x_idx++)
-              for(int y_idx = 0; y_idx < yi; y_idx++)
-                pinst("loadv", neu0_addr->offset(2*(f_idx*xi*yi + x_idx*yi + y_idx)), neu->offset(2*((bt-1)*fi*xi*yi + x_idx*fi*yi + y_idx*fi + f_idx)), (int64_t)2);  
+          pinst("loadv", tmp_addr, neu->offset(2*(bt-1)*fi*xi*yi), 2*fi*xi*yi);  
+          pinst("trans", neu0_addr, tmp_addr, xi*yi, fi);  
 
           // conv0 for each channel
           for(int f_idx = 0; f_idx < fo; f_idx++) {
@@ -4310,15 +4336,15 @@ void exec(symbol_stmt_t::ptr stmt) {
           }
 
           // store res0 (c, h, w) -> (h, w, c)
-          for(int x_idx = 0; x_idx < xo; x_idx++)
-            for(int y_idx = 0; y_idx < yo; y_idx++)
-              for(int f_idx = 0; f_idx < fo; f_idx++)
-                if(stmt->bias != NULL)
-                  pinst("storev", dst->offset(2*((bt-1)*fo*xo*yo + x_idx*yo*fo + y_idx*fo + f_idx)), bia_res0_addr->offset(2*(f_idx*xo*yo + x_idx*yo + y_idx)), (int64_t)2);  
-                else
-                  pinst("storev", dst->offset(2*((bt-1)*fo*xo*yo + x_idx*yo*fo + y_idx*fo + f_idx)), res0_addr->offset(2*(f_idx*xo*yo + x_idx*yo + y_idx)), (int64_t)2);  
+          if(stmt->bias != NULL) {
+            pinst("trans", tmp_addr, bia_res0_addr, fo, xo*yo);  
+            pinst("storev", dst->offset((bt-1)*2*fo*xo*yo), tmp_addr, 2*fo*xo*yo);  
+          }
+          else {
+            pinst("trans", tmp_addr, res0_addr, fo, xo*yo);  
+            pinst("storev", dst->offset((bt-1)*2*fo*xo*yo), tmp_addr, 2*fo*xo*yo);  
+          }
         }
-
       }
     },
 
