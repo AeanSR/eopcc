@@ -34,7 +34,7 @@ std::set<std::string> keywords = {
   "if", "else", "for", "do", "while", "continue", "break", "return", "print",
   "sizeof", "typeof",
   "def", "async", "await", "except",
-  "conv", "pool", "mm", "act", "trans", "cycleadd",
+  "conv", "pool", "mm", "act", "trans", "cycleadd", "floor", "strideio",
   "int", "float", "vector", "extern", "intern", "const", "null",
   "EOPConvolution", "EOPFullyConnected", "EOPPooling", "EOPConcat", "EOPSplit", "EOPDepthwiseConv"
 };
@@ -1136,11 +1136,11 @@ struct arglist_t : public ast_node_t {
 
 struct intrinstmt_t : public ast_node_t {
   int opcode;
-  enum { CONV, POOL, MM, ACT, TRANS, CYCLEADD };
+  enum { CONV, POOL, MM, ACT, TRANS, CYCLEADD, FLOOR, STRIDEIO };
   std::shared_ptr<arglist_t> args;
 
   virtual bool _parse() {
-    return guard(expect_multikeys(opcode, CONV, "conv", "pool", "mm", "act", "trans", "cycleadd") && expect(args) && expect_punc(";"));
+    return guard(expect_multikeys(opcode, CONV, "conv", "pool", "mm", "act", "trans", "cycleadd", "floor", "strideio") && expect(args) && expect_punc(";"));
   }
 };
 
@@ -1674,20 +1674,20 @@ struct symbol_cast_t : public symbol_val_t {
       case 1:
         if (type->signature() == int_sig) return std::get<int64_t>(eval);
         if (type->signature() == float_sig) return (double)std::get<int64_t>(eval);
-        if (type->signature() == vec_sig) {
+ /*       if (type->signature() == vec_sig) {
           float convert = (float)std::get<int64_t>(eval);
           *(uint32_t*)&convert = (uint32_t)0xFFFF0000U & *(uint32_t*)&convert;
           return (double)convert;
-        }
+        }*/
       break;
       case 2:
         if (type->signature() == int_sig) return (int64_t)std::get<double>(eval);
         if (type->signature() == float_sig) return std::get<double>(eval);
-        if (type->signature() == vec_sig) {
+ /*       if (type->signature() == vec_sig) {
           float convert = (float)std::get<double>(eval);
           *(uint32_t*)&convert = (uint32_t)0xFFFF0000U & *(uint32_t*)&convert;
           return (double)convert;
-        }
+        }*/
       break;
       default: break;
     }
@@ -1980,6 +1980,21 @@ struct symbol_cycleadd_t : public symbol_stmt_t {
   symbol_val_t::ptr bigger;
   symbol_val_t::ptr smaller;
   symbol_cycleadd_t(ast_node_t::ptr ast, symbol_val_t::ptr result, symbol_val_t::ptr bigger, symbol_val_t::ptr smaller) : symbol_stmt_t(ast), result(result), bigger(bigger), smaller(smaller) { }
+};
+
+struct symbol_floor_t : public symbol_stmt_t {
+  symbol_val_t::ptr result;
+  symbol_val_t::ptr input;
+  symbol_floor_t(ast_node_t::ptr ast, symbol_val_t::ptr result, symbol_val_t::ptr input) : symbol_stmt_t(ast), result(result), input(input) { }
+};
+
+struct symbol_strideio_t : public symbol_stmt_t {
+  symbol_val_t::ptr dest;
+  symbol_val_t::ptr src;
+  int64_t size;
+  int64_t stride;
+  int64_t n;
+  symbol_strideio_t(ast_node_t::ptr ast, symbol_val_t::ptr dest, symbol_val_t::ptr src, int64_t size, int64_t stride, int64_t n) : symbol_stmt_t(ast), dest(dest), src(src), size(size), stride(stride), n(n) { }
 };
 
 struct symbol_builtin_conv_t : public symbol_stmt_t {
@@ -2859,7 +2874,7 @@ symbol_t::ptr prob(std::shared_ptr<ast_node_t> ast) {
     +[](std::shared_ptr<intrinstmt_t> ast)->symbol_t::ptr {
       auto arglist = prob(ast->args)->to<symbol_arglist_t>();
       for (auto&& arg : arglist->args) {
-        if (arg->type->external) {
+        if (arg->type->external && ast->opcode != intrinstmt_t::STRIDEIO) {
           ast->error() << "intrinsics only accept intern operands." << ast->eol();
           arg->type->note() << "type defined from here:" << arg->type->eol();
         }
@@ -2956,8 +2971,8 @@ symbol_t::ptr prob(std::shared_ptr<ast_node_t> ast) {
             }
             if (err) return std::make_shared<symbol_conv_t>(ast, nullptr, nullptr, nullptr);
             int64_t res_n = res_dim == 4 ? im_type->size[3] : 1;
-            int64_t res_h = (im_type->size[2] - wt_type->size[2] + py + sy - 1) / sy + 1;
-            int64_t res_w = (im_type->size[1] - wt_type->size[1] + px + sx - 1) / sx + 1;
+            int64_t res_h = (im_type->size[2] - wt_type->size[2] + py * 2 + sy) / sy;
+            int64_t res_w = (im_type->size[1] - wt_type->size[1] + px * 2 + sx) / sx;
             int64_t res_c = wt_type->size[3];
             if ((res_dim == 4 && res_n != res_type->size[3]) || res_h != res_type->size[2] || res_w != res_type->size[1] || res_c != res_type->size[0]) {
               ast->warn() << "CONV predicated result shape as <" << (res_dim == 4 ? std::to_string(res_n) + ","s : ""s) << res_h << "," << res_w << "," << res_c << ">, got " << res_type->name() << ast->eol();
@@ -3018,8 +3033,8 @@ symbol_t::ptr prob(std::shared_ptr<ast_node_t> ast) {
               err = true;
             }
             if (err) return std::make_shared<symbol_pool_t>(ast, nullptr, nullptr, 0, 0, 0, 0);
-            int64_t res_w = (im_type->size[1] - kx + px + sx - 1) / sx + 1;
-            int64_t res_h = (im_type->size[2] - ky + py + sy - 1) / sy + 1;
+            int64_t res_w = (im_type->size[1] - kx + px * 2 + sx) / sx;
+            int64_t res_h = (im_type->size[2] - ky + py * 2 + sy) / sy;
             if (res_type->size[1] != res_w || res_type->size[2] != res_h) {
               ast->warn() << "POOL predicated result shape as <" << (res_type->size.size() == 4 ? std::to_string(res_type->size[3]) + ","s : ""s) << res_h << "," << res_w << "," << res_type->size[0] << ">, got " << res_type->name() << ast->eol();
               res->type->note() << "type defined from here:" << res->type->eol();
@@ -3175,6 +3190,82 @@ symbol_t::ptr prob(std::shared_ptr<ast_node_t> ast) {
             }
             if (err) return std::make_shared<symbol_cycleadd_t>(ast, nullptr, nullptr, nullptr);
             return std::make_shared<symbol_cycleadd_t>(ast, res, lhs, rhs);
+          }
+          case intrinstmt_t::FLOOR: {
+            if (arglist->args.size() != 2) {
+              ast->error() << "FLOOR expect 2 arguments, got " << arglist->args.size() << "." << ast->eol();
+              err = true;
+            }
+            if (err) break;
+            auto res = arglist->args[0];
+            auto im = arglist->args[1];
+            auto res_type = res->type->to<symbol_vec_type_t>();
+            auto im_type = im->type->to<symbol_vec_type_t>();
+            if (!res_type) {
+              ast->error() << "FLOOR expect vector type for dest operand. got " << res->type->name() << ast->eol();
+              res->type->note() << "type defined from here:" << res->type->eol();
+              err = true;
+            }
+            if (!im_type) {
+              ast->error() << "FLOOR expect vector type for input operand. got " << im->type->name() << ast->eol();
+              im->type->note() << "type defined from here:" << im->type->eol();
+              err = true;
+            }
+            if (res_type->signature() != im_type->signature()) {
+              ast->error() << "FLOOR expect same type for dest and input operand. got " << res->type->name() << " and " << im->type->name() << " respectively." << ast->eol();
+              res->type->note() << "type defined from here:" << res->type->eol();
+              im->type->note() << "type defined from here:" << im->type->eol();
+              err = true;
+            }
+            if (err) break;
+            return std::make_shared<symbol_floor_t>(ast, res, im);
+          }
+          case intrinstmt_t::STRIDEIO: {
+            if (arglist->args.size() != 5) {
+              ast->error() << "STRIDEIO expect 5 arguments, got " << arglist->args.size() << "." << ast->eol();
+              break;
+            }
+            auto dest = arglist->args[0];
+            auto src = arglist->args[1];
+            int64_t size, stride, n;
+            try {
+              size = std::get<int64_t>(arglist->args[2]->constexpr_eval());
+              stride = std::get<int64_t>(arglist->args[3]->constexpr_eval());
+              n = std::get<int64_t>(arglist->args[4]->constexpr_eval());
+            } catch(...) {
+              ast->error() << "STRIDEIO expect constant int (SEGMENT_SIZE, STRIDE_SIZE, N_SEGMENT) at 3,4,5-th arguments." << ast->eol();
+              break;
+            }
+            auto dest_type = dest->type->to<symbol_vec_type_t>();
+            auto src_type = src->type->to<symbol_vec_type_t>();
+            if (!dest_type) {
+              ast->error() << "STRIDEIO expect vector type for dest operand. got " << dest->type->name() << ast->eol();
+              dest->type->note() << "type defined from here:" << dest->type->eol();
+              err = true;
+            }
+            if (!src_type) {
+              ast->error() << "STRIDEIO expect vector type for source operand. got " << src->type->name() << ast->eol();
+              src->type->note() << "type defined from here:" << src->type->eol();
+              err = true;
+            }
+            if (dest->type->external == src->type->external) {
+              ast->error() << "STRIDEIO expect different storage property for dest and source operand (1 external and 1 internal). got " << dest->type->name() << " and " << src->type->name() << " respectively." << ast->eol();
+              dest->type->note() << "type defined from here:" << dest->type->eol();
+              src->type->note() << "type defined from here:" << src->type->eol();
+              err = true;
+            }
+            if (err) break;
+            auto extl = dest->type->external ? dest : src;
+            auto intl = dest->type->external ? src : dest;
+            if (stride * (n - 1) + size > extl->type->sizeof_()) {
+              ast->warn() << "STRIDEIO accesses out of boundary. accesses " << (stride * (n-1) + size) << " bytes from " << extl->type->name() << "(" << extl->type->sizeof_() << " bytes)." << ast->eol();
+              extl->type->note() << "type defined from here:" << extl->type->eol();
+            }
+            if (n * size > intl->type->sizeof_()) {
+              ast->warn() << "STRIDEIO accesses out of boundary. accesses " << (n * size) << " bytes from " << intl->type->name() << "(" << intl->type->sizeof_() << " bytes)." << ast->eol();
+              intl->type->note() << "type defined from here:" << intl->type->eol();
+            }
+            return std::make_shared<symbol_strideio_t>(ast, dest, src, size, stride, n);
           }
           default:
             ast->error() << "intrinsic not implemented." << ast->eol();
@@ -3485,6 +3576,7 @@ void exec(symbol_stmt_t::ptr stmt);
 reg_t except_reg(0);
 
 genval_t eval(symbol_val_t::ptr val) {
+  verbose( 4, val->note() << "codegen evaluate " << val->type->name() << ":" << typeid(*val).name() << val->eol() );
   auto cv = val->constexpr_eval();
   switch (cv.index()) {
   case 1:
@@ -3501,8 +3593,8 @@ genval_t eval(symbol_val_t::ptr val) {
 
     +[](std::shared_ptr<symbol_var_t> val)->genval_t {
       if (val->va < 0) {
-        val->error() << "variable " << val->type->name() << "\"" << val->name << "\" used before allocated... this must be a bug of eopcc?" << val->eol();
-        return std::monostate();
+        val->error() << "cannot use variable " << val->type->name() << "\"" << val->name << "\". failed to allocate." << val->eol();
+        val->va = 0xCCCCCCCC;
       }
       auto type = val->type;
       while (type is typeid(symbol_array_type_t)) type = type->to<symbol_array_type_t>()->elem_type;
@@ -3564,7 +3656,9 @@ genval_t eval(symbol_val_t::ptr val) {
           }
         }
         if (origin is typeid(symbol_vec_type_t)) {
-          pinst("movvs", reg_t::alloc(val), std::get<addr_t::ptr>(from)->opr(val));
+          auto rv = std::get<addr_t::ptr>(from)->rv(true);
+          pinst("movv", rv, std::get<addr_t::ptr>(from)->opr(val), to->sizeof_());
+          return rv;
         }
         auto rv = std::make_shared<addr_t>(val, true, 0, to->sizeof_())->rv(true);
         pinst("movsv", rv, reg_t::alloc(val));
@@ -3927,7 +4021,7 @@ void exec(symbol_stmt_t::ptr stmt) {
       if (type is typeid(symbol_vec_type_t)) {
         int64_t addr = stmt->var->va;
         for (auto&& p : active.front()) {
-          if (p->addr == addr) {
+          if (p && p->addr == addr) {
             p = nullptr; return;
           }
         }
@@ -4080,6 +4174,22 @@ void exec(symbol_stmt_t::ptr stmt) {
       int64_t n1 = stmt->bigger->type->sizeof_();
       int64_t n2 = stmt->smaller->type->sizeof_();
       pinst("cycleadd", res, big, sml, n1, n2);
+    },
+
+    +[](std::shared_ptr<symbol_floor_t> stmt) {
+      auto res = std::get<addr_t::ptr>(eval(stmt->result));
+      auto im = std::get<addr_t::ptr>(eval(stmt->input));
+      int64_t n = stmt->input->type->sizeof_();
+      pinst("floor", res, im, n);
+    },
+
+    +[](std::shared_ptr<symbol_strideio_t> stmt) {
+      auto dest = std::get<addr_t::ptr>(eval(stmt->dest));
+      auto src = std::get<addr_t::ptr>(eval(stmt->src));
+      int64_t size = stmt->size;
+      int64_t stride = stmt->stride;
+      int64_t n = stmt->n;
+      pinst("strideio", dest, src, size, stride, n);
     },
 
     +[](std::shared_ptr<symbol_builtin_conv_t> stmt) {
