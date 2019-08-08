@@ -1674,20 +1674,20 @@ struct symbol_cast_t : public symbol_val_t {
       case 1:
         if (type->signature() == int_sig) return std::get<int64_t>(eval);
         if (type->signature() == float_sig) return (double)std::get<int64_t>(eval);
-        if (type->signature() == vec_sig) {
+ /*       if (type->signature() == vec_sig) {
           float convert = (float)std::get<int64_t>(eval);
           *(uint32_t*)&convert = (uint32_t)0xFFFF0000U & *(uint32_t*)&convert;
           return (double)convert;
-        }
+        }*/
       break;
       case 2:
         if (type->signature() == int_sig) return (int64_t)std::get<double>(eval);
         if (type->signature() == float_sig) return std::get<double>(eval);
-        if (type->signature() == vec_sig) {
+ /*       if (type->signature() == vec_sig) {
           float convert = (float)std::get<double>(eval);
           *(uint32_t*)&convert = (uint32_t)0xFFFF0000U & *(uint32_t*)&convert;
           return (double)convert;
-        }
+        }*/
       break;
       default: break;
     }
@@ -2956,8 +2956,8 @@ symbol_t::ptr prob(std::shared_ptr<ast_node_t> ast) {
             }
             if (err) return std::make_shared<symbol_conv_t>(ast, nullptr, nullptr, nullptr);
             int64_t res_n = res_dim == 4 ? im_type->size[3] : 1;
-            int64_t res_h = (im_type->size[2] - wt_type->size[2] + py + sy - 1) / sy + 1;
-            int64_t res_w = (im_type->size[1] - wt_type->size[1] + px + sx - 1) / sx + 1;
+            int64_t res_h = (im_type->size[2] - wt_type->size[2] + py * 2 + sy) / sy;
+            int64_t res_w = (im_type->size[1] - wt_type->size[1] + px * 2 + sx) / sx;
             int64_t res_c = wt_type->size[3];
             if ((res_dim == 4 && res_n != res_type->size[3]) || res_h != res_type->size[2] || res_w != res_type->size[1] || res_c != res_type->size[0]) {
               ast->warn() << "CONV predicated result shape as <" << (res_dim == 4 ? std::to_string(res_n) + ","s : ""s) << res_h << "," << res_w << "," << res_c << ">, got " << res_type->name() << ast->eol();
@@ -3018,8 +3018,8 @@ symbol_t::ptr prob(std::shared_ptr<ast_node_t> ast) {
               err = true;
             }
             if (err) return std::make_shared<symbol_pool_t>(ast, nullptr, nullptr, 0, 0, 0, 0);
-            int64_t res_w = (im_type->size[1] - kx + px + sx - 1) / sx + 1;
-            int64_t res_h = (im_type->size[2] - ky + py + sy - 1) / sy + 1;
+            int64_t res_w = (im_type->size[1] - kx + px * 2 + sx) / sx;
+            int64_t res_h = (im_type->size[2] - ky + py * 2 + sy) / sy;
             if (res_type->size[1] != res_w || res_type->size[2] != res_h) {
               ast->warn() << "POOL predicated result shape as <" << (res_type->size.size() == 4 ? std::to_string(res_type->size[3]) + ","s : ""s) << res_h << "," << res_w << "," << res_type->size[0] << ">, got " << res_type->name() << ast->eol();
               res->type->note() << "type defined from here:" << res->type->eol();
@@ -3485,6 +3485,7 @@ void exec(symbol_stmt_t::ptr stmt);
 reg_t except_reg(0);
 
 genval_t eval(symbol_val_t::ptr val) {
+  verbose( 4, val->note() << "codegen evaluate " << val->type->name() << ":" << typeid(*val).name() << val->eol() );
   auto cv = val->constexpr_eval();
   switch (cv.index()) {
   case 1:
@@ -3501,8 +3502,8 @@ genval_t eval(symbol_val_t::ptr val) {
 
     +[](std::shared_ptr<symbol_var_t> val)->genval_t {
       if (val->va < 0) {
-        val->error() << "variable " << val->type->name() << "\"" << val->name << "\" used before allocated... this must be a bug of eopcc?" << val->eol();
-        return std::monostate();
+        val->error() << "cannot use variable " << val->type->name() << "\"" << val->name << "\". failed to allocate." << val->eol();
+        val->va = 0xCCCCCCCC;
       }
       auto type = val->type;
       while (type is typeid(symbol_array_type_t)) type = type->to<symbol_array_type_t>()->elem_type;
@@ -3564,7 +3565,9 @@ genval_t eval(symbol_val_t::ptr val) {
           }
         }
         if (origin is typeid(symbol_vec_type_t)) {
-          pinst("movvs", reg_t::alloc(val), std::get<addr_t::ptr>(from)->opr(val));
+          auto rv = std::get<addr_t::ptr>(from)->rv(true);
+          pinst("movv", rv, std::get<addr_t::ptr>(from)->opr(val), to->sizeof_());
+          return rv;
         }
         auto rv = std::make_shared<addr_t>(val, true, 0, to->sizeof_())->rv(true);
         pinst("movsv", rv, reg_t::alloc(val));
@@ -3927,7 +3930,7 @@ void exec(symbol_stmt_t::ptr stmt) {
       if (type is typeid(symbol_vec_type_t)) {
         int64_t addr = stmt->var->va;
         for (auto&& p : active.front()) {
-          if (p->addr == addr) {
+          if (p && p->addr == addr) {
             p = nullptr; return;
           }
         }
