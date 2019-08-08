@@ -3257,11 +3257,11 @@ symbol_t::ptr prob(std::shared_ptr<ast_node_t> ast) {
             if (err) break;
             auto extl = dest->type->external ? dest : src;
             auto intl = dest->type->external ? src : dest;
-            if (stride * (n - 1) + size > extl->type->sizeof_()) {
+            if (stride * (n - 1) + size > extl->type->sizeof_() && extl->type->sizeof_() > 0) {
               ast->warn() << "STRIDEIO accesses out of boundary. accesses " << (stride * (n-1) + size) << " bytes from " << extl->type->name() << "(" << extl->type->sizeof_() << " bytes)." << ast->eol();
               extl->type->note() << "type defined from here:" << extl->type->eol();
             }
-            if (n * size > intl->type->sizeof_()) {
+            if (n * size > intl->type->sizeof_() && intl->type->sizeof_() > 0) {
               ast->warn() << "STRIDEIO accesses out of boundary. accesses " << (n * size) << " bytes from " << intl->type->name() << "(" << intl->type->sizeof_() << " bytes)." << ast->eol();
               intl->type->note() << "type defined from here:" << intl->type->eol();
             }
