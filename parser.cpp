@@ -3288,7 +3288,7 @@ symbol_t::ptr prob(std::shared_ptr<ast_node_t> ast) {
 
       switch(ast->opcode) {
         case builtin_t::CONV: {
-          usage = "usage: EOPConvolution(extern vector[NHWC/HWC] dest, extern vector[NHWC] kernel, extern vector[NHWC/HWC] input, extern vector[C] bias, const int stride_x = 1, const int stride_y, const int pad_x, const int pad_y);";
+          usage = "usage: EOPConvolution(extern vector[NHWC/HWC] dest, extern vector[NHWC] kernel, extern vector[NHWC/HWC] input, extern vector[C] bias, const int stride_x, const int stride_y, const int pad_x, const int pad_y);";
           if (arglist->args.size() != 8) {
             ast->error() << "expect 8 args, got " << arglist->args.size() << ast->eol();
             ast->note() << usage << ast->eol();
@@ -3312,6 +3312,117 @@ symbol_t::ptr prob(std::shared_ptr<ast_node_t> ast) {
           sym->bt = dest_type->size.size() == 4 ? dest_type->size[3] : 1;
           sym->fi = weight_type->size[0];
           sym->fo = weight_type->size[3];
+          sym->kx = weight_type->size[1];
+          sym->ky = weight_type->size[2];
+          sym->xi = input_type->size[1];
+          sym->yi = input_type->size[2];
+          try {
+            sym->sx = std::get<int64_t>(arglist->args[4]->constexpr_eval());
+            sym->sy = std::get<int64_t>(arglist->args[5]->constexpr_eval());
+            sym->px = std::get<int64_t>(arglist->args[6]->constexpr_eval());
+            sym->py = std::get<int64_t>(arglist->args[7]->constexpr_eval());
+          } catch(...) {
+            ast->error() << "expect const int on 5,6,7,8-th args." << ast->eol();
+            ast->note() << usage << ast->eol();
+            break;
+          }
+          return sym;
+        }
+        case builtin_t::MLP: {
+          usage = "usage: EOPFullyConnected(extern vector[NC/C] dest, extern vector[NC] kernel, extern vector[NC/C] input, extern vector[C] bias);";
+          if (arglist->args.size() != 4) {
+            ast->error() << "expect 4 args, got " << arglist->args.size() << ast->eol();
+            ast->note() << usage << ast->eol();
+            break;
+          }
+          auto sym = std::make_shared<symbol_builtin_conv_t>(ast);
+          sym->operator_type = symbol_builtin_conv_t::MLP;
+          sym->dest = arglist->args[0];
+          sym->weight = arglist->args[1];
+          sym->input = arglist->args[2];
+          sym->bias = arglist->args[3]; if (sym->bias is typeid(symbol_null_t)) sym->bias = nullptr;
+          auto dest_type = sym->dest->type->to<symbol_vec_type_t>();
+          auto weight_type = sym->weight->type->to<symbol_vec_type_t>();
+          auto input_type = sym->input->type->to<symbol_vec_type_t>();
+          auto bias_type = sym->bias ? sym->bias->type->to<symbol_vec_type_t>() : nullptr;
+          if (!dest_type || !weight_type || !input_type || (sym->bias && !bias_type)) {
+            sym->dest->error() << "expect extern vector on 1,2,3,4-th args." << ast->eol();
+            ast->note() << usage << ast->eol();
+            break; 
+          }
+          sym->bt = dest_type->size.size() == 2 ? dest_type->size[1] : 1;
+          sym->fi = input_type->size[0];
+          sym->fo = weight_type->size[1];
+          sym->kx = 1;
+          sym->ky = 1;
+          sym->xi = 1;
+          sym->yi = 1;
+          sym->sx = sym->sy = 1;
+          sym->px = sym->py = 0;
+          return sym;
+        }
+        case builtin_t::POOL: {
+          usage = "usage: EOPPooling(extern vector[NHWC/HWC] dest, extern vector[NHWC/HWC] input, const int kernel_x, const int kernel_y, const int stride_x, const int stride_y, const int pad_x, const int pad_y);";
+          if (arglist->args.size() != 8) {
+            ast->error() << "expect 8 args, got " << arglist->args.size() << ast->eol();
+            ast->note() << usage << ast->eol();
+            break;
+          }
+          auto sym = std::make_shared<symbol_builtin_pool_t>(ast);
+          sym->operator_type = symbol_builtin_pool_t::POOL;
+          sym->dest = arglist->args[0];
+          sym->input = arglist->args[1];
+          auto dest_type = sym->dest->type->to<symbol_vec_type_t>();
+          auto input_type = sym->input->type->to<symbol_vec_type_t>();
+          if (!dest_type || !input_type) {
+            sym->dest->error() << "expect extern vector on 1,2-th args." << ast->eol();
+            ast->note() << usage << ast->eol();
+            break; 
+          }
+          sym->bt = dest_type->size.size() == 4 ? dest_type->size[3] : 1;
+          sym->fi = input_type->size[0];
+          sym->fo = sym->fi;
+          sym->xi = input_type->size[1];
+          sym->yi = input_type->size[2];
+          try {
+            sym->kx = std::get<int64_t>(arglist->args[2]->constexpr_eval());
+            sym->ky = std::get<int64_t>(arglist->args[3]->constexpr_eval());
+            sym->sx = std::get<int64_t>(arglist->args[4]->constexpr_eval());
+            sym->sy = std::get<int64_t>(arglist->args[5]->constexpr_eval());
+            sym->px = std::get<int64_t>(arglist->args[6]->constexpr_eval());
+            sym->py = std::get<int64_t>(arglist->args[7]->constexpr_eval());
+          } catch(...) {
+            ast->error() << "expect const int on 3,4,5,6,7,8-th args." << ast->eol();
+            ast->note() << usage << ast->eol();
+            break;
+          }
+          return sym;
+        }
+        case builtin_t::DEPTHWISE_CONV: {
+          usage = "usage: EOPDepthwiseConv(extern vector[NHWC/HWC] dest, extern vector[HWC] kernel, extern vector[NHWC/HWC] input, extern vector[C] bias, const int stride_x, const int stride_y, const int pad_x, const int pad_y);";
+          if (arglist->args.size() != 8) {
+            ast->error() << "expect 8 args, got " << arglist->args.size() << ast->eol();
+            ast->note() << usage << ast->eol();
+            break;
+          }
+          auto sym = std::make_shared<symbol_builtin_conv_t>(ast);
+          sym->operator_type = symbol_builtin_conv_t::DEPTHWISE_CONV;
+          sym->dest = arglist->args[0];
+          sym->weight = arglist->args[1];
+          sym->input = arglist->args[2];
+          sym->bias = arglist->args[3]; if (sym->bias is typeid(symbol_null_t)) sym->bias = nullptr;
+          auto dest_type = sym->dest->type->to<symbol_vec_type_t>();
+          auto weight_type = sym->weight->type->to<symbol_vec_type_t>();
+          auto input_type = sym->input->type->to<symbol_vec_type_t>();
+          auto bias_type = sym->bias ? sym->bias->type->to<symbol_vec_type_t>() : nullptr;
+          if (!dest_type || !weight_type || !input_type || (sym->bias && !bias_type)) {
+            sym->dest->error() << "expect extern vector on 1,2,3,4-th args." << ast->eol();
+            ast->note() << usage << ast->eol();
+            break; 
+          }
+          sym->bt = dest_type->size.size() == 4 ? dest_type->size[3] : 1;
+          sym->fi = weight_type->size[0];
+          sym->fo = sym->fi;
           sym->kx = weight_type->size[1];
           sym->ky = weight_type->size[2];
           sym->xi = input_type->size[1];
