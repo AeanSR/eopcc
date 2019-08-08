@@ -4078,7 +4078,9 @@ void exec(symbol_stmt_t::ptr stmt) {
         auto dst = std::get<addr_t::ptr>(eval(stmt->dest));
         auto syn = std::get<addr_t::ptr>(eval(stmt->weight));
         auto neu = std::get<addr_t::ptr>(eval(stmt->input));
-        auto bia = std::get<addr_t::ptr>(eval(stmt->bias));
+        addr_t::ptr bia;
+        if(stmt->bias != NULL)
+          bia = std::get<addr_t::ptr>(eval(stmt->bias));
         int64_t bt = stmt->bt;
         int64_t xi = stmt->xi;
         int64_t yi = stmt->yi;
@@ -4092,86 +4094,113 @@ void exec(symbol_stmt_t::ptr stmt) {
         int64_t py = stmt->py;
         int64_t xo = (xi + 2*px - kx + sx) / sx;
         int64_t yo = (yi + 2*py - ky + sy) / sy;
+        printf("parser.cpp: CONV parameters:\n bt = %d\n xi = %d, yi = %d\n fi = %d, fo = %d\n kx = %d, ky = %d, sx = %d, sy = %d\n px = %d, py = %d\n xo = %d, yo = %d\n", bt, xi, yi, fi, fo, kx, ky, sx, sy, px, py, xo, yo);
         // data_size: 2byte
         int64_t total_size;
-        if(stmt->bias != NULL)
-          total_size = fi*fo*kx*ky + fo + 2*fi*xi*yi + 4*fo*xo*yo;
-        else
-          total_size = fi*fo*kx*ky + 2*fi*xi*yi + 2*fo*xo*yo;
-        if(2*total_size > 1048576) {
-          printf("too large to handle!\n");
+        int64_t sp_fo;
+        int64_t sp_num = 0;
+    
+        if(2*(fi*kx*ky + 2*fi*xi*yi + 2*xo*yo) > 1048576) {
+          printf("parser.cpp CONV too large to handle!!!");
           exit(0);
         }
+        while(1) {
+          sp_num++;
+          sp_fo = fo%sp_num ? fo/sp_num+1 : fo/sp_num;
+          if(stmt->bias != NULL)
+            total_size = fi*sp_fo*kx*ky + sp_fo + 2*fi*xi*yi + 4*sp_fo*xo*yo;
+          else
+            total_size = fi*sp_fo*kx*ky + 2*fi*xi*yi + 2*sp_fo*xo*yo;
+          if(2*total_size <= 1048576)  break;
+        }
+        sp_num = fo%sp_fo ? fo/sp_fo+1 : fo/sp_fo;
+        printf("parser.cpp: CONV fo = %d, sp_num = %d, sp_fo = %d, 2*total_size = %d <= 1048576\n", fo, sp_num, sp_fo, 2*total_size);
 
 
-        addr_t::ptr syn_addr  = std::make_shared<addr_t>(stmt, 1, 2*(0                                  ), 2*fi*fo*kx*ky);
-        addr_t::ptr neu0_addr = std::make_shared<addr_t>(stmt, 1, 2*(fi*fo*kx*ky                        ), 2*fi*xi*yi);
-        addr_t::ptr neu1_addr = std::make_shared<addr_t>(stmt, 1, 2*(fi*fo*kx*ky + fi*xi*yi             ), 2*fi*xi*yi);
-        addr_t::ptr res0_addr = std::make_shared<addr_t>(stmt, 1, 2*(fi*fo*kx*ky + 2*fi*xi*yi           ), 2*fo*xo*yo);
-        addr_t::ptr res1_addr = std::make_shared<addr_t>(stmt, 1, 2*(fi*fo*kx*ky + 2*fi*xi*yi + fo*xo*yo), 2*fo*xo*yo);
+        addr_t::ptr syn_addr  = std::make_shared<addr_t>(stmt, 1, 2*(0                                        ), 2*fi*sp_fo*kx*ky);
+        addr_t::ptr neu0_addr = std::make_shared<addr_t>(stmt, 1, 2*(fi*sp_fo*kx*ky                           ), 2*fi*xi*yi);
+        addr_t::ptr neu1_addr = std::make_shared<addr_t>(stmt, 1, 2*(fi*sp_fo*kx*ky + fi*xi*yi                ), 2*fi*xi*yi);
+        addr_t::ptr res0_addr = std::make_shared<addr_t>(stmt, 1, 2*(fi*sp_fo*kx*ky + 2*fi*xi*yi              ), 2*sp_fo*xo*yo);
+        addr_t::ptr res1_addr = std::make_shared<addr_t>(stmt, 1, 2*(fi*sp_fo*kx*ky + 2*fi*xi*yi + sp_fo*xo*yo), 2*sp_fo*xo*yo);
 
         addr_t::ptr bia_addr     ; 
         addr_t::ptr bia_res0_addr; 
         addr_t::ptr bia_res1_addr; 
         if(stmt->bias != NULL) {
-          bia_addr      = std::make_shared<addr_t>(stmt, 1, 2*(fi*fo*kx*ky + 2*fi*xi*yi + 2*fo*xo*yo     ), 2*fo);
-          bia_res0_addr = std::make_shared<addr_t>(stmt, 1, 2*(fi*fo*kx*ky + 2*fi*xi*yi + 2*fo*xo*yo + fo), 2*fo*xo*yo);
-          bia_res1_addr = std::make_shared<addr_t>(stmt, 1, 2*(fi*fo*kx*ky + 2*fi*xi*yi + 3*fo*xo*yo + fo), 2*fo*xo*yo);
-
-          // load bias
-          pinst("loadv", bia_addr, bia, 2*fo);  
+          bia_addr      = std::make_shared<addr_t>(stmt, 1, 2*(fi*sp_fo*kx*ky + 2*fi*xi*yi + 2*sp_fo*xo*yo        ), 2*sp_fo);
+          bia_res0_addr = std::make_shared<addr_t>(stmt, 1, 2*(fi*sp_fo*kx*ky + 2*fi*xi*yi + 2*sp_fo*xo*yo + sp_fo), 2*sp_fo*xo*yo);
+          bia_res1_addr = std::make_shared<addr_t>(stmt, 1, 2*(fi*sp_fo*kx*ky + 2*fi*xi*yi + 3*sp_fo*xo*yo + sp_fo), 2*sp_fo*xo*yo);
         }
 
-        // load weight
-        pinst("loadv", syn_addr, syn, 2*fi*fo*kx*ky);  
-
-        for(int iter = 0; iter < bt/2; iter++) {
-          // load neu0
-          pinst("loadv", (neu0_addr), (neu)->offset((2*iter+0)*2*fi*xi*yi), 2*fi*xi*yi);  
-
-          // load neu1
-          pinst("loadv", (neu1_addr), (neu)->offset((2*iter+1)*2*fi*xi*yi), 2*fi*xi*yi);  
-
-          // conv0
-          pinst("conv", (res0_addr), (syn_addr), (neu0_addr), fi, fo, kx, ky, xi, yi, (int64_t)1, sx, sy, px, py);
-          // conv0 mac_result add bias
-          if(stmt->bias != NULL)
-            pinst("cycleadd", (bia_res0_addr), (res0_addr), (bia_addr), 2*fo*xo*yo, 2*fo);
-
-          // conv1
-          pinst("conv", (res1_addr), (syn_addr), (neu1_addr), fi, fo, kx, ky, xi, yi, (int64_t)1, sx, sy, px, py);
-          // conv1 mac_result add bias
-          if(stmt->bias != NULL)
-            pinst("cycleadd", (bia_res1_addr), (res1_addr), (bia_addr), 2*fo*xo*yo, 2*fo);
-
-          // store res0
-          if(stmt->bias != NULL)
-            pinst("storev", (dst)->offset((2*iter+0)*2*fo*xo*yo), (bia_res0_addr), 2*fo*xo*yo);  
+        int64_t comp_fo;
+        for(int sp_idx = 0; sp_idx < sp_num; sp_idx++) {
+          if((sp_idx == sp_num-1) && (fo%sp_fo != 0))
+            comp_fo = fo%sp_fo;
           else
-            pinst("storev", (dst)->offset((2*iter+0)*2*fo*xo*yo), (res0_addr), 2*fo*xo*yo);  
+            comp_fo = sp_fo;
 
-          // store res1
-          if(stmt->bias != NULL)
-            pinst("storev", (dst)->offset((2*iter+1)*2*fo*xo*yo), (bia_res1_addr), 2*fo*xo*yo);  
-          else
-            pinst("storev", (dst)->offset((2*iter+1)*2*fo*xo*yo), (res1_addr), 2*fo*xo*yo);  
-        }
+          // load weight
+          pinst("loadv", syn_addr, syn->offset(2*sp_idx*sp_fo*fi*kx*ky), 2*comp_fo*fi*kx*ky);  
+          if(stmt->bias != NULL) {
+            // load bias
+            pinst("loadv", bia_addr->offset(2*sp_idx*sp_fo), bia, 2*comp_fo);  
+          }
 
-        if(bt%2) {
-          // load neu0
-          pinst("loadv", (neu0_addr), (neu)->offset((bt-1)*2*fi*xi*yi), 2*fi*xi*yi);  
+          int iter = 0;
+          for(iter = 0; iter < bt/2; iter++) {
+            printf("parser.cpp: CONV compute, sp_idx = %d, batch_iter = %d, comp_fo = %d\n", sp_idx, iter, comp_fo);
+        
+            // load neu0
+            pinst("loadv", (neu0_addr), (neu)->offset((2*iter+0)*2*fi*xi*yi), 2*fi*xi*yi);  
 
-          // conv0
-          pinst("conv", (res0_addr), (syn_addr), (neu0_addr), fi, fo, kx, ky, xi, yi, (int64_t)1, sx, sy, px, py);
-          // conv0 mac_result add bias
-          if(stmt->bias != NULL)
-            pinst("cycleadd", (bia_res0_addr), (res0_addr), (bia_addr), 2*fo*xo*yo, 2*fo);
+            // load neu1
+            pinst("loadv", (neu1_addr), (neu)->offset((2*iter+1)*2*fi*xi*yi), 2*fi*xi*yi);  
 
-          // store res0
-          if(stmt->bias != NULL)
-            pinst("storev", (dst)->offset((bt-1)*2*fo*xo*yo), (bia_res0_addr), 2*fo*xo*yo);  
-          else
-            pinst("storev", (dst)->offset((bt-1)*2*fo*xo*yo), (res0_addr), 2*fo*xo*yo);  
+            // conv0
+            pinst("conv", (res0_addr), (syn_addr), (neu0_addr), fi, comp_fo, kx, ky, xi, yi, (int64_t)1, sx, sy, px, py);
+            // conv0 mac_result add bias
+            if(stmt->bias != NULL)
+              pinst("cycleadd", (bia_res0_addr), (res0_addr), (bia_addr), 2*comp_fo*xo*yo, 2*comp_fo);
+
+            // conv1
+            pinst("conv", (res1_addr), (syn_addr), (neu1_addr), fi, comp_fo, kx, ky, xi, yi, (int64_t)1, sx, sy, px, py);
+            // conv1 mac_result add bias
+            if(stmt->bias != NULL)
+              pinst("cycleadd", (bia_res1_addr), (res1_addr), (bia_addr), 2*comp_fo*xo*yo, 2*comp_fo);
+
+            // stride_storev: dst_addr(on DDR, gapped address), src_addr(on SPM, continuous address), num, size, stride (size <= stride)
+            // stride_storev: [src_addr + size*idx +: size] -> [dst_addr + stride*idx +: size], idx = 0, 1, ..., num-1
+
+            // store res0
+            if(stmt->bias != NULL)
+              pinst("stride_storev", dst->offset(2*((2*iter+0)*fo*xo*yo + sp_idx*sp_fo)), bia_res0_addr, xo*yo, 2*comp_fo, 2*fo);  
+            else
+              pinst("stride_storev", dst->offset(2*((2*iter+0)*fo*xo*yo + sp_idx*sp_fo)), res0_addr, xo*yo, 2*comp_fo, 2*fo);  
+
+            // store res1
+            if(stmt->bias != NULL)
+              pinst("stride_storev", dst->offset(2*((2*iter+1)*fo*xo*yo + sp_idx*sp_fo)), bia_res1_addr, xo*yo, 2*comp_fo, 2*fo);  
+            else
+              pinst("stride_storev", dst->offset(2*((2*iter+1)*fo*xo*yo + sp_idx*sp_fo)), res1_addr, xo*yo, 2*comp_fo, 2*fo);  
+          }
+
+          if(bt%2) {
+            printf("parser.cpp: CONV compute, sp_idx = %d, batch_iter = %d, comp_fo = %d\n", sp_idx, iter, comp_fo);
+            // load neu0
+            pinst("loadv", (neu0_addr), (neu)->offset((bt-1)*2*fi*xi*yi), 2*fi*xi*yi);  
+
+            // conv0
+            pinst("conv", (res0_addr), (syn_addr), (neu0_addr), fi, comp_fo, kx, ky, xi, yi, (int64_t)1, sx, sy, px, py);
+            // conv0 mac_result add bias
+            if(stmt->bias != NULL)
+              pinst("cycleadd", (bia_res0_addr), (res0_addr), (bia_addr), 2*comp_fo*xo*yo, 2*comp_fo);
+
+            // store res0
+            if(stmt->bias != NULL)
+              pinst("stride_storev", dst->offset(2*((bt-1)*fo*xo*yo + sp_idx*sp_fo)), bia_res0_addr, xo*yo, 2*comp_fo, 2*fo);  
+            else
+              pinst("stride_storev", dst->offset(2*((bt-1)*fo*xo*yo + sp_idx*sp_fo)), res0_addr, xo*yo, 2*comp_fo, 2*fo);  
+          }
         }
       } 
 
@@ -4218,7 +4247,7 @@ void exec(symbol_stmt_t::ptr stmt) {
         else
           total_size = fi*kx*ky + 2*fi*xi*yi + 2*fo*xo*yo + tmp_size;
         if(2*total_size > 1048576) {
-          printf("too large to handle!\n");
+          printf("parser.cpp: DEPTHWISE_CONV too large to handle!\n");
           exit(0);
         }
 
@@ -4368,7 +4397,7 @@ void exec(symbol_stmt_t::ptr stmt) {
         int64_t total_size;
         total_size = 2*fi*xi*yi + 2*fi*xo*yo;
         if(2*total_size > 1048576) {
-          printf("too large to handle!\n");
+          printf("parser.cpp: POOL too large to handle!\n");
           exit(0);
         }
 
