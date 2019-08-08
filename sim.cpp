@@ -24,16 +24,16 @@ constexpr double ddr_write_energy = 268.068 * 1e-9; // nJ
 constexpr double ddr_bandwidth = 34.12 * 1024 * 1024 * 1024; // byte/s
 
   // -- CACHE ----
-  // 45nm, 128KB SRAM, 64 Bytes/Line, Full Associate, 1.88633mm2
+  // 45nm, 8KB SRAM, 64 Bytes/Line, Full Associate, 0.219241mm2
 constexpr int64_t cache_line = 64; // bytes
-constexpr int64_t cache_num_lines = 2048; // lines
-constexpr double cache_hit_latency = 0.288567 * 1e-9; // ns
-constexpr double cache_miss_latency = 0.135693 * 1e-9; // ns
-constexpr double cache_write_latency = 0.172852 * 1e-9; // ns
-constexpr double cache_leakage = 8.46162 * 1e-3; // mW
-constexpr double cache_hit_energy = 0.142214 * 1e-9; // nJ
-constexpr double cache_miss_energy = 0.142214 * 1e-9; // nJ
-constexpr double cache_write_energy = 0.141439 * 1e-9; // nJ
+constexpr int64_t cache_num_lines = 128; // lines
+constexpr double cache_hit_latency = 0.140499 * 1e-9; // ns
+constexpr double cache_miss_latency = 0.113233 * 1e-9; // ns
+constexpr double cache_write_latency = 0.048177 * 1e-9; // ns
+constexpr double cache_leakage = 0.866498 * 1e-3; // mW
+constexpr double cache_hit_energy = 0.0557851 * 1e-9; // nJ
+constexpr double cache_miss_energy = 0.0557851 * 1e-9; // nJ
+constexpr double cache_write_energy = 0.0542248 * 1e-9; // nJ
 
   // -- SPM ----
   // 45nm, 1MB SRAM, 64 Bytes/Line, 2.88368mm2
@@ -172,6 +172,10 @@ struct io_t : public coroutine_t {
     }
     log("mem hibernate.");
     hibernate;
+    if (!gets.empty())
+      yield(ellapse(read_latency()));
+    else
+      yield(ellapse(write_latency()));
   })
   future_t* get(int64_t addr, int64_t size, cell_t* data) {
     future_t* fut = new future_t;
@@ -187,6 +191,8 @@ struct io_t : public coroutine_t {
   virtual abstract_mem_t* mem() = 0;
   virtual timestamp_t get_exec(get_request_t& req) = 0;
   virtual timestamp_t set_exec(set_request_t& req) = 0;
+  virtual timestamp_t read_latency() const = 0;
+  virtual timestamp_t write_latency() const = 0;
 };
 
 struct mem_io_t : public io_t {
@@ -194,11 +200,13 @@ struct mem_io_t : public io_t {
   virtual bool duplex() const { return false; }
   virtual abstract_mem_t* mem() { return &data_array; }
   virtual timestamp_t get_exec(get_request_t& req) {
-    return ddr_read_latency + ((req.size + line_bytes - 1) / line_bytes) * line_bytes / ddr_bandwidth;
+    return ((req.size + line_bytes - 1) / line_bytes) * line_bytes / ddr_bandwidth;
   }
   virtual timestamp_t set_exec(set_request_t& req) {
-    return ddr_write_latency + ((req.size + line_bytes - 1) / line_bytes) * line_bytes / ddr_bandwidth;
+    return ((req.size + line_bytes - 1) / line_bytes) * line_bytes / ddr_bandwidth;
   }
+  virtual timestamp_t read_latency() const { return ddr_read_latency; }
+  virtual timestamp_t write_latency() const { return ddr_write_latency; }
 };
 
 mem_io_t& ddr() {
@@ -216,6 +224,8 @@ struct spm_io_t : public io_t {
   virtual timestamp_t set_exec(set_request_t& req) {
     return spm_write_latency;
   }
+  virtual timestamp_t read_latency() const { return spm_read_latency; }
+  virtual timestamp_t write_latency() const { return spm_write_latency; }
 };
 
 spm_io_t& spm() {
@@ -224,8 +234,22 @@ spm_io_t& spm() {
 }
 
 struct cache_t : public coroutine_t {
-  std::list<int64_t> history;
-  std::unordered_map<int64_t, int> tags;
+  struct _tag_t {
+    timestamp_t last_used;
+    int64_t tag;
+    _tag_t(timestamp_t ts, int64_t tag) : last_used(ts), tag(tag) { }
+
+  };
+  struct tag_t {
+    std::shared_ptr<_tag_t> ptr;
+    tag_t() = default;
+    tag_t(timestamp_t ts, int64_t tag) : ptr(std::make_shared<_tag_t>(ts, tag)) { }
+    bool operator<(const tag_t& rhs) const {
+      return ptr->last_used > rhs.ptr->last_used;
+    }
+  };
+  std::priority_queue<tag_t> history;
+  std::unordered_map<int64_t, tag_t> tags;
   mem_t data_array;
   struct cache_request_t {
     int mode;
@@ -246,14 +270,17 @@ struct cache_t : public coroutine_t {
     return false;
   }
   void record(int64_t addr) {
-    if (lookup(addr)) return;
     int64_t tag = addr / line_bytes;
-    tags[tag] = history.size();
-    history.push_back(tag);
-    if (history.size() > cache_num_lines) {
-      tags[tag] = tags[history.front()];
-      tags.erase(history.front());
-      history.pop_front();
+    if (lookup(addr)) {
+      tags[tag].ptr->last_used = global_time;
+    } else {
+      tag_t t(global_time, tag);
+      tags[tag] = t;
+      history.push(t);
+      if (history.size() > cache_num_lines) {
+        tags.erase(history.top().ptr->tag);
+        history.pop();
+      }
     }
   }
 
