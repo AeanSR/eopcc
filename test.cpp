@@ -48,7 +48,7 @@ extern vector[2708][16] node_forward_1;
           // ^-- cast to extern to keep storage specifier, so data loading wont be triggered before assignment.
   
       // compute prefetched input from previous stage. performs in [1, 19)-th stage.
-      if (i > 0 && i < 19) 0;
+      if (i > 0 && i < 19)
         mm output_nodes[(i + 1) % 2], layer1_weight, input_nodes[(i + 1) % 2]; // matrix-mul intrinsic.
                           // ^----------------------------------------^-- opposite data of prefetch/write-back.
     }

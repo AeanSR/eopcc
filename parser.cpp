@@ -556,8 +556,10 @@ bool expect(std::shared_ptr<T>& get) {
   if (_get->parse()) {
     get = _get;
     return true;
+  } else {
+    get = nullptr;
+    return false;
   }
-  return false;
 }
 
 #define guard(...) [&](){ auto _guard_b = syn_cursor; bool _guard_r = (__VA_ARGS__); if (_guard_r) return _guard_r; else syn_cursor = _guard_b; return _guard_r; }()
@@ -1692,8 +1694,8 @@ struct symbol_cast_t : public symbol_val_t {
     return std::monostate();
   }
   static bool op_accept(symbol_type_t::ptr from, symbol_type_t::ptr to) {
-    if (from->signature() == to->signature()) return true; // self-cast / cast of storage.
-    if (from is typeid(symbol_vec_type_t) && to is typeid(symbol_vec_type_t)) return true; // reinterpret vector.
+    if (from->signature() == to->signature() && from->external == to->external) return true; // self-cast
+    if (from is typeid(symbol_vec_type_t) && to is typeid(symbol_vec_type_t) && from->external == to->external) return true; // reinterpret vector.
     if (from->is_scalar() && to->is_scalar()) return true; // among scalar types.
     return false;
   }
@@ -2073,11 +2075,6 @@ symbol_t::ptr symbol_case_binary_operators(std::shared_ptr<T> ast,
         return 0;
       };
       opr_check(lhs), opr_check(rhs);
-      if (lhs->rvvalue() && rhs->rvvalue()) {
-        ast->error() << "binary operands cannot be both rv-value. assign one of them to lvalue first." << ast->eol();
-        lhs->type->note() << "type defined from here:" << lhs->type->eol();
-        rhs->type->note() << "type defined from here:" << rhs->type->eol();
-      }
       if (lhs->type->signature() != rhs->type->signature()) {
         if (lhs->type->signature() == symbol_vec_type_t::new_()->signature())
           lhs = std::make_shared<symbol_cast_t>(ast, lhs, symbol_float_type_t::new_(ast));
@@ -2097,6 +2094,13 @@ symbol_t::ptr symbol_case_binary_operators(std::shared_ptr<T> ast,
           rhs = std::make_shared<symbol_cast_t>(ast, rhs, lhs->type);
         else if ((rhs->type is typeid(symbol_float_type_t) || rhs->type is typeid(symbol_vec_type_t)) && lhs->type is typeid(symbol_int_type_t))
           lhs = std::make_shared<symbol_cast_t>(ast, lhs, rhs->type); 
+      }
+      if (lhs->rvvalue() && rhs->rvvalue()) {
+        ast->error() << "binary operands cannot be both rv-value. assign one of them to lvalue first." << ast->eol();
+        lhs->type->note() << "type defined from here: "
+                     << lhs->type->name() << (lhs->type->signature() != lt->signature() ? "(implicitly promoted from "s + lt->name() + ")"s : "") << "." << lhs->type->eol();
+        rhs->type->note() << "type defined from here: "
+                     << rhs->type->name() << (rhs->type->signature() != rt->signature() ? "(implicitly promoted from "s + rt->name() + ")"s : "") << "." << rhs->type->eol();
       }
       if (!std::get<2>(oplut[ast->type])) {
         ast->error() << "binary operator " << std::get<1>(oplut[ast->type]) << " is not implemented." << ast->eol();
@@ -2118,10 +2122,6 @@ symbol_t::ptr symbol_case_assign(std::shared_ptr<T> ast, symbol_t::ptr _rhs) {
       ast->error() << "assignment destination do not accept rv-value." << ast->eol();
       lhs->type->note() << "type defined from here:" << lhs->type->eol();
     }
-    if (lhs->type->external && rhs->rvvalue()) {
-      ast->error() << "cannot assign rv-value to extern directly. assign to intern first." << ast->eol();
-      lhs->type->note() << "type defined from here:" << lhs->type->eol();
-    }
     if (!lhs->type->is_scalar() && !(lhs->type is typeid(symbol_vec_type_t))) {
       ast->error() << "expect int/float/vector values in operands, got non-value type " << lhs->type->name() << "." << ast->eol();
       lhs->type->note() << "type defined from here:" << lhs->type->eol();
@@ -2140,8 +2140,16 @@ symbol_t::ptr symbol_case_assign(std::shared_ptr<T> ast, symbol_t::ptr _rhs) {
     if (lhs->type->signature() != rhs->type->signature() && !symbol_cast_t::op_accept(rhs->type, lhs->type)) {
       ast->error() << "cannot cast from type " << rhs->type->name() << " to " << lhs->type->name() << "." << ast->eol();
     }
-    return std::make_shared<symbol_assign_t>(ast, lhs,
-        rhs->type->signature() != lhs->type->signature() ? std::make_shared<symbol_cast_t>(ast, rhs, lhs->type) : rhs);
+    auto implicit_rhs = rhs->type->signature() != lhs->type->signature() ? std::make_shared<symbol_cast_t>(ast, rhs, lhs->type->intern(false)) : rhs;
+    if (lhs->type->external && implicit_rhs->rvvalue()) {
+      ast->error() << "cannot assign rv-value to extern directly. assign to intern first." << ast->eol();
+      lhs->type->note() << "dest type defined from here:" << lhs->type->eol();
+      rhs->type->note() << "source type defined from here:" << rhs->type->eol();
+      if (implicit_rhs->type->signature() != rhs->type->signature()) {
+        implicit_rhs->type->note() << "source implicitly converted from " << rhs->type->name() << " to " << implicit_rhs->type->name() << implicit_rhs->type->eol();
+      }
+    }
+    return std::make_shared<symbol_assign_t>(ast, lhs, implicit_rhs);
 }
 
 bool is_in_except = false;
@@ -2351,7 +2359,7 @@ symbol_t::ptr prob(std::shared_ptr<ast_node_t> ast) {
         ast->error() << "prefix unary operator " << std::get<1>(oplut[ast->type]) << " does not accept operand of type " << lhs->type->name() << "." << ast->eol();
         lhs->type->note() << "type defined from here:" << lhs->type->eol();
       }
-      if (lhs->type->external && lhs->type is typeid(symbol_vec_type_t)) {
+      if (lhs->type->external && lhs->type is typeid(symbol_vec_type_t) && !(opcode in std::set<int>{symbol_unary_t::SIZEOF, symbol_unary_t::TYPEOF})) {
         ast->error() << "extern vector must be explicitly moved to intern variables before participating operations." << ast->eol();
         lhs->type->note() << "type defined from here:" << lhs->type->eol();
       }
@@ -2697,11 +2705,12 @@ symbol_t::ptr prob(std::shared_ptr<ast_node_t> ast) {
         stmts->list.push_back(std::make_shared<symbol_alloc_t>(ast, var));
         if (init) {
           if (!type->is_scalar()) {
-            init->error() << "initialize of non-scalar variables is not implemented." << init->eol();
+            ast->error() << "initialize of non-scalar variables is not implemented." << ast->eol();
           }
           if (type->const_) {
             if (init->constexpr_eval().index() == 0) {
-              init->error() << "const variable initializer must be constant." << init->eol();
+              ast->error() << "const variable initializer must be constant." << ast->eol();
+              init->type->note() << "initializer defined from here:" << init->type->eol();
             }
             var->constval = init->constexpr_eval();
           }
