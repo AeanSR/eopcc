@@ -5,6 +5,7 @@
 #include <memory>
 #include <queue>
 #include <list>
+#include <map>
 #include <iostream>
 #include <typeinfo>
 
@@ -59,13 +60,21 @@ struct coroutine_t {
 #define hibernate do{_crbp=__LINE__;sleep=true;return;case __LINE__:;}while(0)
 #define async(...) void operator()(){sleep=false;switch(_crbp){case 0: default:{__VA_ARGS__}}}
   virtual void operator()() = 0;
-  coroutine_t() : _crbp(0), sleep(true) { }
+  static std::list<coroutine_t*>& list() {
+    static std::list<coroutine_t*> _lcr;
+    return _lcr;
+  }
+  coroutine_t() : _crbp(0), sleep(true) { list().push_back(this); }
 };
 
 struct future_t {
+  bool finished = false;
   coroutine_t* _ftcb = nullptr;
-#define await(fut) do{(fut)->_ftcb=this;_crbp=__LINE__;return;case __LINE__:;}while(0)
-#define finish(fut) do{if((fut)->_ftcb)eq.emplace(ellapse(0),(fut)->_ftcb);delete fut;}while(0)
+#define await(fut) do{if([&](auto&& _fut){if(!_fut||_fut->finished)return false;_fut->_ftcb=this;_crbp=__LINE__;return true;}(fut))return;case __LINE__:;}while(0)
+#define finish(fut) do{if((fut)->_ftcb)eq.emplace(ellapse(0),(fut)->_ftcb);fut->finished=true;}while(0)
+#define finish_at(fut,ts) do{future_scheduler().schedule(ts,fut);}while(0)
+  using ptr = std::shared_ptr<future_t>;
+  static ptr new_() { return std::make_shared<future_t>(); }
 };
 
 struct event_t {
@@ -78,6 +87,26 @@ struct event_t {
 };
 
 std::priority_queue<event_t> eq;
+
+struct future_scheduler_t : public coroutine_t {
+  std::multimap<timestamp_t, future_t::ptr> scheduled;
+  void schedule(timestamp_t t, future_t::ptr f) {
+    scheduled.insert({t,f}); eq.emplace(t, this);
+  }
+  async(
+    while(1) {
+      for (auto i = scheduled.begin(); i != scheduled.upper_bound(global_time); i++)
+        finish(i->second);
+      scheduled.erase(scheduled.begin(), scheduled.upper_bound(global_time));
+      hibernate;
+    }
+  )
+};
+
+future_scheduler_t& future_scheduler() {
+  static future_scheduler_t _fs;
+  return _fs;
+}
 
 struct cell_t {
   bool det;
@@ -126,18 +155,20 @@ struct spm_t : public abstract_mem_t {
 
 struct io_t : public coroutine_t {
   struct get_request_t {
+    timestamp_t ts;
     int64_t addr;
     int64_t size;
     cell_t* data;
-    future_t* fut;
-    get_request_t(int64_t addr, int64_t size, cell_t* data, future_t* fut) : addr(addr), size(size), data(data), fut(fut) { }
+    future_t::ptr fut;
+    get_request_t(int64_t addr, int64_t size, cell_t* data, future_t::ptr fut) : ts(global_time), addr(addr), size(size), data(data), fut(fut) { }
   };
   struct set_request_t {
+    timestamp_t ts;
     int64_t addr;
     int64_t size;
-    cell_t data;
-    future_t* fut;
-    set_request_t(int64_t addr, int64_t size, cell_t data, future_t* fut) : addr(addr), size(size), data(data), fut(fut) { }
+    cell_t* data;
+    future_t::ptr fut;
+    set_request_t(int64_t addr, int64_t size, cell_t* data, future_t::ptr fut) : ts(global_time), addr(addr), size(size), data(data), fut(fut) { }
   };
   std::list<get_request_t> gets;
   std::list<set_request_t> sets;
@@ -146,15 +177,16 @@ struct io_t : public coroutine_t {
   async(while(1) {
     while (get_finish || set_finish || !gets.empty() || !sets.empty()) {
       log("mem loop.");
-      if (!get_finish && !gets.empty() && (duplex() || !set_finish)) {
+      if (!get_finish && !gets.empty() && (duplex() || !set_finish) && (sets.empty() || gets.front().ts <= sets.front().ts)) {
         log("mem start get.");
         get_finish = ellapse(get_exec(gets.front()));
-      } else if (!set_finish && !sets.empty() && (duplex() || !get_finish)) {
+      } else if (!set_finish && !sets.empty() && (duplex() || !get_finish) && (gets.empty() || sets.front().ts <= gets.front().ts)) {
         log("mem start set.");
         set_finish = ellapse(set_exec(sets.front()));
       } else if (get_finish && (!set_finish || get_finish <= set_finish)) {
         log("mem exec get.");
-        yield(get_finish);
+        while (get_finish > global_time)
+          yield(get_finish);
         get_finish = 0;
         if (gets.front().data) *gets.front().data = mem()->ref(gets.front().addr);
         log("mem get finish.");
@@ -162,9 +194,13 @@ struct io_t : public coroutine_t {
         gets.pop_front();
       } else if (set_finish && (!get_finish || get_finish > set_finish)) {
         log("mem exec set.");
-        yield(ellapse(set_finish));
+        while (set_finish > global_time)
+          yield(set_finish);
         set_finish = 0;
-        mem()->ref(sets.front().addr) = sets.front().data;
+        if (sets.front().data)
+          mem()->ref(sets.front().addr) = *sets.front().data;
+        else
+          mem()->ref(sets.front().addr).det = false;
         log("mem set finish.");
         finish(sets.front().fut);
         sets.pop_front();
@@ -177,20 +213,48 @@ struct io_t : public coroutine_t {
     else
       yield(ellapse(write_latency()));
   })
-  future_t* get(int64_t addr, int64_t size, cell_t* data) {
-    future_t* fut = new future_t;
-    gets.emplace_back(addr, size, data, fut); awake;
+  future_t::ptr get(int64_t addr, int64_t size) {
+    future_t::ptr fut = future_t::new_();
+    gets.emplace_back(addr, size, nullptr, fut); awake;
     return fut;
   }
-  future_t* set(int64_t addr, int64_t size, cell_t* data) {
-    future_t* fut = new future_t;
-    sets.emplace_back(addr, size, *data, fut); awake;
+  future_t::ptr set(int64_t addr, int64_t size) {
+    future_t::ptr fut = future_t::new_();
+    sets.emplace_back(addr, size, nullptr, fut); awake;
     return fut;
+  }
+  future_t::ptr get(int64_t addr, cell_t* data) {
+    future_t::ptr fut = future_t::new_();
+    if (sleep) {
+      gets.emplace_back(addr, gr().word_size, data, fut); awake;
+      return fut;
+    } else {
+      *data = mem()->ref(addr);
+      auto time = get_exec(get_request_t(addr, gr().word_size, data, fut));
+      if (get_finish)
+        get_finish += time;
+      finish_at(fut, ellapse(time));
+      return fut;
+    }
+  }
+  future_t::ptr set(int64_t addr, cell_t* data) {
+    future_t::ptr fut = future_t::new_();
+    if (sleep) {
+      sets.emplace_back(addr, gr().word_size, data, fut); awake;
+      return fut;
+    } else {
+      mem()->ref(addr) = *data;
+      auto time = set_exec(set_request_t(addr, gr().word_size, data, nullptr));
+      if (set_finish)
+        set_finish += time;
+      finish_at(fut, ellapse(time));
+      return fut;
+    }
   }
   virtual bool duplex() const = 0;
   virtual abstract_mem_t* mem() = 0;
-  virtual timestamp_t get_exec(get_request_t& req) = 0;
-  virtual timestamp_t set_exec(set_request_t& req) = 0;
+  virtual timestamp_t get_exec(get_request_t req) = 0;
+  virtual timestamp_t set_exec(set_request_t req) = 0;
   virtual timestamp_t read_latency() const = 0;
   virtual timestamp_t write_latency() const = 0;
 };
@@ -199,10 +263,10 @@ struct mem_io_t : public io_t {
   mem_t data_array;
   virtual bool duplex() const { return false; }
   virtual abstract_mem_t* mem() { return &data_array; }
-  virtual timestamp_t get_exec(get_request_t& req) {
+  virtual timestamp_t get_exec(get_request_t req) {
     return ((req.size + line_bytes - 1) / line_bytes) * line_bytes / ddr_bandwidth;
   }
-  virtual timestamp_t set_exec(set_request_t& req) {
+  virtual timestamp_t set_exec(set_request_t req) {
     return ((req.size + line_bytes - 1) / line_bytes) * line_bytes / ddr_bandwidth;
   }
   virtual timestamp_t read_latency() const { return ddr_read_latency; }
@@ -218,19 +282,19 @@ struct spm_io_t : public io_t {
   spm_t data_array;
   virtual bool duplex() const { return true; }
   virtual abstract_mem_t* mem() { return &data_array; }
-  virtual timestamp_t get_exec(get_request_t& req) {
-    return spm_read_latency;
+  virtual timestamp_t get_exec(get_request_t req) {
+    return (req.size + line_bytes - 1) / line_bytes / frequency;
   }
-  virtual timestamp_t set_exec(set_request_t& req) {
-    return spm_write_latency;
+  virtual timestamp_t set_exec(set_request_t req) {
+    return (req.size + line_bytes - 1) / line_bytes / frequency;
   }
   virtual timestamp_t read_latency() const { return spm_read_latency; }
   virtual timestamp_t write_latency() const { return spm_write_latency; }
 };
 
-spm_io_t& spm() {
-  static spm_io_t _io;
-  return _io;
+spm_io_t& spm(int bank) {
+  static spm_io_t _io[2];
+  return _io[bank];
 }
 
 struct cache_t : public coroutine_t {
@@ -256,8 +320,8 @@ struct cache_t : public coroutine_t {
     int64_t addr;
     int64_t size;
     cell_t* data;
-    future_t* fut;
-    cache_request_t(int mode, int64_t addr, cell_t* data, future_t* fut) : mode(mode), addr(addr), size(size), data(data), fut(fut) { }
+    future_t::ptr fut;
+    cache_request_t(int mode, int64_t addr, cell_t* data, future_t::ptr fut) : mode(mode), addr(addr), size(size), data(data), fut(fut) { }
     cache_request_t() = default;
   };
   std::list<cache_request_t> reqs;
@@ -299,7 +363,7 @@ struct cache_t : public coroutine_t {
       if (req.mode == 0) { // read
         if (!hit) { // miss, must read from ddr.
           log("cache proxy ddr read.");
-          await(ddr().get(req.addr, data_array.word_size, &data_array.ref(req.addr)));
+          await(ddr().get(req.addr, &data_array.ref(req.addr)));
           log("cache proxy ddr read finish.");
         }
         *req.data = data_array.ref(req.addr);
@@ -315,7 +379,7 @@ struct cache_t : public coroutine_t {
         finish(req.fut); // execution dont need to wait cache writing.
         if (!hit || *req.data != data_array.ref(req.addr)) {
           log("cache proxy ddr write. cache write.");
-          ddr().set(req.addr, data_array.word_size, req.data); // no await, write cache and ddr simutaneously.
+          ddr().set(req.addr, req.data); // no await, write cache and ddr simutaneously.
           yield(ellapse(cache_write_latency));
           data_array.ref(req.addr) = *req.data;
           record(req.addr);
@@ -326,13 +390,13 @@ struct cache_t : public coroutine_t {
     log("cache hibernate.");
     hibernate;
   })
-  future_t* get(int64_t addr, cell_t* data) {
-    future_t* fut = new future_t;
+  future_t::ptr get(int64_t addr, cell_t* data) {
+    future_t::ptr fut = future_t::new_();
     reqs.emplace_back(0, addr, data, fut); awake;
     return fut;
   }
-  future_t* set(int64_t addr, cell_t* data) {
-    future_t* fut = new future_t;
+  future_t::ptr set(int64_t addr, cell_t* data) {
+    future_t::ptr fut = future_t::new_();
     reqs.emplace_back(1, addr, data, fut); awake;
     return fut;
   }
@@ -361,17 +425,24 @@ struct iaddr_t : public addr_t {
 
 struct controller_t : public coroutine_t {
   int i;
+  int j;
   bool halted;
+  std::vector<future_t::ptr> hs;
   async(for(i = 0; i < 10; i++) {
     log(i);
-    await(cache().get(i * 16, new cell_t));
-    await(cache().set(i * 16 + 8, new cell_t));
+    hs.push_back(ddr().get(10000 + i * 16, 1024));
+    hs.push_back(ddr().set(10000 + i * 16 + 8, 1024));
+    hs.push_back(cache().get(i * 16, new cell_t));
+    hs.push_back(cache().set(i * 16 + 8, new cell_t));
+    for (j = 0; j < 4; j++) await(hs[j]);
+    hs.clear();
   } halted = true;)
 };
 
 int main() {
   controller_t controller;
-  controller();
+  for (auto&& p : coroutine_t::list())
+    p->operator()();
   while(!eq.empty()) {
     auto e = eq.top(); eq.pop();
     if (global_time <= e.time) {
