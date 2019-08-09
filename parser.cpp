@@ -16,6 +16,9 @@
 #include <functional>
 #include <variant>
 #include <bitset>
+#include <sys/ioctl.h>
+#include <cstdio>
+#include <unistd.h>
 
 using namespace std::string_literals;
 
@@ -1338,10 +1341,10 @@ struct compstmt_t : public ast_node_t {
       if (expect_punc("{")) {
         decltype(stmts)::value_type stmt;
         while(expect(stmt)) stmts.push_back(stmt);
-        std::shared_ptr<builtin_t> builtin;
+     /*   std::shared_ptr<builtin_t> builtin;
         if (expect(builtin)) {
           return syn_cursor--, upd_error("built-in library call must be global-scoped.");
-        }
+        }  */
         return expect_punc("}");
       }
       return false;
@@ -1356,9 +1359,10 @@ struct stmt_t : public ast_node_t {
   std::shared_ptr<compstmt_t> comp;
   std::shared_ptr<ctrlstmt_t> ctrl;
   std::shared_ptr<printstmt_t> print_;
+  std::shared_ptr<builtin_t> builtin;
 
   virtual bool _parse() {
-    return expect(print_) || expect(intrin) || expect(ctrl) || expect(comp) || expect(decl) || expect(expr);
+    return expect(builtin) || expect(print_) || expect(intrin) || expect(ctrl) || expect(comp) || expect(decl) || expect(expr);
   }
 };
 
@@ -1367,7 +1371,7 @@ struct translation_unit_t : public ast_node_t {
   std::shared_ptr<builtin_t> builtin;
 
   virtual bool _parse() {
-    if (expect(builtin)) return true;
+//    if (expect(builtin)) return true;
     decltype(stmts)::value_type stmt;
     while(expect(stmt)) stmts.push_back(stmt);
     return !stmts.empty();
@@ -1415,6 +1419,7 @@ struct symbol_type_t : public symbol_t {
   virtual uint64_t signature() const = 0;
   virtual std::string _name() const = 0;
   virtual bool is_scalar() const { return false; };
+  virtual bool is_spm() const { return false; };
   std::string name() const { return (external ? "extern "s : ""s) + _name(); }
   symbol_type_t(ast_node_t::ptr cur) : symbol_t(cur), external(false), const_(false) { }
   symbol_type_t(const symbol_type_t& rhs) : symbol_t(rhs), external(rhs.external), const_(rhs.const_) { }
@@ -1505,6 +1510,7 @@ struct symbol_vec_type_t : public symbol_fundamental_type_t {
     return ss.str();
   }
   virtual bool is_scalar() const { return size.empty(); }
+  virtual bool is_spm() const { return true; };
   template<class... Args>
   static std::shared_ptr<symbol_vec_type_t> new_(Args&&... args) { return std::make_shared<symbol_vec_type_t>(std::forward<Args>(args)...); }
   virtual ptr intern(bool ex=false) const { auto c = std::make_shared<symbol_vec_type_t>(*this); c->external = ex; return c; }
@@ -1583,6 +1589,7 @@ struct symbol_array_type_t : public symbol_type_t {
     ss << elem_type->_name() << "[" << size << "]";
     return ss.str();
   }
+  virtual bool is_spm() const { return elem_type->is_spm(); };
   virtual ptr intern(bool ex=false) const { return nullptr; }
   virtual ptr constant(bool co=false) const { return nullptr; }
 };
@@ -1599,7 +1606,8 @@ struct symbol_var_t : public symbol_val_t {
   std::string name;
   simval_t constval;
   int64_t va;
-  symbol_var_t(ast_node_t::ptr ast, symbol_type_t::ptr type, std::string name) : symbol_val_t(ast, type), name(name), va(-1) { }
+  bool invalid_by_builtin;
+  symbol_var_t(ast_node_t::ptr ast, symbol_type_t::ptr type, std::string name) : symbol_val_t(ast, type), name(name), va(-1), invalid_by_builtin(false) { }
   virtual bool lvalue() const { return !constval.index(); }
   virtual bool rvvalue() const { return false; }
   virtual simval_t constexpr_eval() const {
@@ -2214,14 +2222,14 @@ symbol_t::ptr prob(std::shared_ptr<ast_node_t> ast) {
       auto v = prob(ast->var);
       if (v is typeid(symbol_null_t)) {
         v->error() << "\"" << ast->var->name << "\" is not defined." << v->eol();
-        if (ast->var->name in symbol_history) {
-          symbol_history[ast->var->name]->note() << "there was a symbol \"" << ast->var->name << "\" defined but obsoleted by a built-in library call. " <<
-                       "built-in library call will end the lifecycle of any intern variables." << symbol_history[ast->var->name]->eol();
-          symbol_history.erase(ast->var->name);
-        }
         auto fake = std::make_shared<symbol_var_t>(ast, symbol_void_type_t::new_(ast), ast->var->name); // resume from void
         symbol_registry.front()[ast->var->name] = fake;
         return fake;
+      }
+      if (v is typeid(symbol_var_t) && v->to<symbol_var_t>()->invalid_by_builtin) {
+        v->error() << "there was a vector variable \"" << ast->var->name << "\" defined but obsoleted by a built-in library call. " <<
+                      "built-in library call will end the lifecycle of any intern vectors." << v->eol();
+        v->to<symbol_var_t>()->invalid_by_builtin = false;
       }
       return v;
     },
@@ -2692,10 +2700,11 @@ symbol_t::ptr prob(std::shared_ptr<ast_node_t> ast) {
           ast->error() << "declaration of variable conflicts with a non-variable symbol." << ast->eol();
           current->note() << "previous defined from here:" << current->eol();
         }
-        if (is_in_tr_scope && (type->external || type->const_)) {
-          ast->warn() << "external or const variables have global lifecycle. this will be hidden by an previous defined intern variable." << ast->eol();
-          current->note() << "previous defined from here:" << current->eol();
-        } else if (name in symbol_registry.front()) {
+        //if (is_in_tr_scope && (type->external || type->const_)) {
+        //  ast->warn() << "external or const variables have global lifecycle. this will be hidden by an previous defined intern variable." << ast->eol();
+        //  current->note() << "previous defined from here:" << current->eol();
+        //} else
+        if (name in symbol_registry.front()) {
           auto previous = current->to<symbol_var_t>();
           if (previous) stmts->list.push_back(std::make_shared<symbol_free_t>(ast, previous));
         }
@@ -2704,7 +2713,7 @@ symbol_t::ptr prob(std::shared_ptr<ast_node_t> ast) {
         if (init) {
           if (init is typeid(symbol_call_t) && init->rvvalue()) {
             symbol_registry.front()[name] = init;
-            if (is_in_tr_scope) symbol_history[name] = var;
+            //if (is_in_tr_scope) symbol_history[name] = var;
             stmts->list.push_back(std::make_shared<symbol_eval_t>(ast, init));
           } else if (init is typeid(symbol_call_t)) {
             init->error() << "exception handler must be initialized with an async function call. got sync function call." << ast->eol();
@@ -2733,9 +2742,9 @@ symbol_t::ptr prob(std::shared_ptr<ast_node_t> ast) {
           ast->warn() << "const variable default initialized to zero." << ast->eol();
           var->constval = (int64_t)0;
         }
-        auto& scope = is_in_tr_scope && (type->external || type->const_) ? symbol_registry.back() : symbol_registry.front();
+        auto& scope = /*is_in_tr_scope && (type->external || type->const_) ? symbol_registry.back() :*/ symbol_registry.front();
         scope[name] = var;
-        if (is_in_tr_scope && !(type->external || type->const_)) symbol_history[name] = var;
+        //if (is_in_tr_scope && !(type->external || type->const_)) symbol_history[name] = var;
       }
 
       return stmts;
@@ -2746,17 +2755,17 @@ symbol_t::ptr prob(std::shared_ptr<ast_node_t> ast) {
       std::string name = ast->name;
       for (auto&& v : ast->args)
         args.push_back(v->var->name);
-      if (!is_in_tr_scope && name in symbol_registry.front()) {
+      if (/*!is_in_tr_scope && */name in symbol_registry.front()) {
         ast->warn() << "function definition hides previous defined symbol in current scope." << ast->eol();
         symbol_registry.front()[name]->note() << "previous defined from here:" << symbol_registry.front()[name]->eol();
-      } else if (is_in_tr_scope && scoped_lookup(name) && !(name in symbol_registry.back())) {
+      }/* else if (is_in_tr_scope && scoped_lookup(name) && !(name in symbol_registry.back())) {
         ast->warn() << "global-scoped function definition hidden by previous defined symbol." << ast->eol();
         scoped_lookup(name)->note() << "previous defined from here:" << scoped_lookup(name)->eol();
-      }
+      }*/
       auto func_type = symbol_func_type_t::new_(ast, name, args);
       auto func = std::make_shared<symbol_func_t>(ast, func_type, ast->body);
-      if (is_in_tr_scope) symbol_registry.back()[name] = func;
-      else symbol_registry.front()[name] = func;
+      /*if (is_in_tr_scope) symbol_registry.back()[name] = func;
+      else*/ symbol_registry.front()[name] = func;
       return func;
     },
 
@@ -3274,6 +3283,18 @@ symbol_t::ptr prob(std::shared_ptr<ast_node_t> ast) {
     },
 
     +[](std::shared_ptr<stmt_t> ast)->symbol_t::ptr {
+      if (ast->builtin) {
+        auto stmts = std::make_shared<symbol_stmt_list_t>(ast);
+        for (auto&& r : symbol_registry) for (auto&& v : r) {
+          auto vv = v.second->to<symbol_var_t>();
+          if (vv && vv->type->is_spm() && !vv->type->external) {
+            stmts->list.push_back(std::make_shared<symbol_free_t>(ast, vv));
+            vv->invalid_by_builtin = true;
+          }
+        }
+        stmts->list.push_back(prob(ast->builtin)->to<symbol_stmt_t>());
+        return stmts;
+      }
       if (ast->print_) return prob(ast->print_);
       if (ast->intrin) return prob(ast->intrin);
       if (ast->ctrl) return prob(ast->ctrl);
@@ -4076,6 +4097,7 @@ inst_t::ptr break_point;
 inst_t::ptr continue_point;
 inst_t::ptr return_point;
 genval_t return_val;
+bool show_spm = false;
 
 void exec(symbol_stmt_t::ptr stmt) {
   if (!stmt) return;
@@ -4109,6 +4131,7 @@ void exec(symbol_stmt_t::ptr stmt) {
       int64_t size = stmt->var->type->sizeof_();
       while (type is typeid(symbol_array_type_t)) type = type->to<symbol_array_type_t>()->elem_type;
       if (type is typeid(symbol_vec_type_t)) {
+        auto ospm = spm;
         if (stmt->var->type->external) {
           stmt->var->va = spm_size;
         } else try {
@@ -4117,21 +4140,47 @@ void exec(symbol_stmt_t::ptr stmt) {
           active.front().push_back(alloc);
           //pinst("allocated spm for", stmt->var->name, stmt->var->va);
         } catch(...) {
-          stmt->error() << "SPM bad alloc: try to alloc " << size << " bytes for " << stmt->var->type->name() << "\"" << stmt->var->name << "\" (currently used " << spm.count() << " bytes)." << stmt->eol();
+          stmt->warn() << "SPM bad alloc: try to alloc " << size << " bytes for " << stmt->var->type->name() << "\"" << stmt->var->name << "\" (currently used " << spm.count() << " bytes)." << stmt->eol();
         }
+        if (show_spm) {
+          struct winsize w;
+          ioctl(STDOUT_FILENO, TIOCGWINSZ, &w);
+          stmt->note() << "SPM alloc " << size << " bytes for " << stmt->var->type->name() << "\"" << stmt->var->name << "\". memory pattern shown below:" << stmt->eol();
+          std::cout << " " << std::string(w.ws_col - 2, '=') << std::endl;
+          for (int y = 0; y < 16; y++) {
+            std::cout << " |";
+            for (int x = 0; x < w.ws_col - 4; x++) {
+              int64_t addr = x * 16 + y;
+              int64_t addrlb = addr * spm_size / ((w.ws_col - 4) * 16);
+              int64_t addrub = (addr * spm_size + spm_size - 1) / ((w.ws_col - 4) * 16);
+              bool o = false;
+              bool n = false;
+              for (int64_t i = addrlb; i < addrub; i++) {
+                o |= ospm[i];
+                n |= spm[i] && !ospm[i];
+              }
+              if (n) std::cout << "*";
+              else if (o) std::cout << ".";
+              else std::cout << " ";
+            }
+            std::cout << "|" << std::endl;
+          }
+          std::cout << " " << std::string(w.ws_col - 2, '=') << std::endl << "used before: " << ospm.count() << ", used after: " << spm.count() << ", bytes available: " << spm_size - spm.count() << std::endl << std::endl;
+        }
+        
       } else {
         stmt->var->va = mem_size;
         mem_size += size;
         //pinst("allocated mem for", stmt->var->name, stmt->var->va);
       }
+      
     },
 
     +[](std::shared_ptr<symbol_free_t> stmt) {
       auto type = stmt->var->type;
-      while(type is typeid(symbol_array_type_t)) type = type->to<symbol_array_type_t>()->elem_type;
-      if (type is typeid(symbol_vec_type_t)) {
+      if (type->is_spm() && !type->external) {
         int64_t addr = stmt->var->va;
-        for (auto&& p : active.front()) {
+        for (auto&& a : active) for (auto&& p : a) {
           if (p && p->addr == addr) {
             p = nullptr; return;
           }
@@ -4403,15 +4452,15 @@ void exec(symbol_stmt_t::ptr stmt) {
 
             // store res0
             if(stmt->bias != NULL)
-              pinst("stride_storev", dst->offset(2*((2*iter+0)*fo*xo*yo + sp_idx*sp_fo)), bia_res0_addr, xo*yo, 2*comp_fo, 2*fo);  
+              pinst("strideio", dst->offset(2*((2*iter+0)*fo*xo*yo + sp_idx*sp_fo)), bia_res0_addr, 2*comp_fo, 2*fo, xo*yo);  
             else
-              pinst("stride_storev", dst->offset(2*((2*iter+0)*fo*xo*yo + sp_idx*sp_fo)), res0_addr, xo*yo, 2*comp_fo, 2*fo);  
+              pinst("strideio", dst->offset(2*((2*iter+0)*fo*xo*yo + sp_idx*sp_fo)), res0_addr, 2*comp_fo, 2*fo, xo*yo);  
 
             // store res1
             if(stmt->bias != NULL)
-              pinst("stride_storev", dst->offset(2*((2*iter+1)*fo*xo*yo + sp_idx*sp_fo)), bia_res1_addr, xo*yo, 2*comp_fo, 2*fo);  
+              pinst("strideio", dst->offset(2*((2*iter+1)*fo*xo*yo + sp_idx*sp_fo)), bia_res1_addr, 2*comp_fo, 2*fo, xo*yo);  
             else
-              pinst("stride_storev", dst->offset(2*((2*iter+1)*fo*xo*yo + sp_idx*sp_fo)), res1_addr, xo*yo, 2*comp_fo, 2*fo);  
+              pinst("strideio", dst->offset(2*((2*iter+1)*fo*xo*yo + sp_idx*sp_fo)), res1_addr, 2*comp_fo, 2*fo, xo*yo);  
           }
 
           if(bt%2) {
@@ -4427,9 +4476,9 @@ void exec(symbol_stmt_t::ptr stmt) {
 
             // store res0
             if(stmt->bias != NULL)
-              pinst("stride_storev", dst->offset(2*((bt-1)*fo*xo*yo + sp_idx*sp_fo)), bia_res0_addr, xo*yo, 2*comp_fo, 2*fo);  
+              pinst("strideio", dst->offset(2*((bt-1)*fo*xo*yo + sp_idx*sp_fo)), bia_res0_addr, 2*comp_fo, 2*fo, xo*yo);  
             else
-              pinst("stride_storev", dst->offset(2*((bt-1)*fo*xo*yo + sp_idx*sp_fo)), res0_addr, xo*yo, 2*comp_fo, 2*fo);  
+              pinst("strideio", dst->offset(2*((bt-1)*fo*xo*yo + sp_idx*sp_fo)), res0_addr, 2*comp_fo, 2*fo, xo*yo);  
           }
         }
       } 
@@ -4700,7 +4749,8 @@ int main(int argc, char** argv) {
         for (int i = 1; argv[fno][i] == 'v'; i++) verbose_level++;
       } else if (argv[fno][1] == 'o') {
         get_output = true;
-        continue;
+      } else if (argv[fno][1] == 'm') {
+        show_spm = true;
       }
     } else {
       fc++, read_source(argv[fno]);
