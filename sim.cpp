@@ -412,15 +412,80 @@ struct reg_t {
 };
 
 struct addr_t {
-  
+  virtual int64_t eval() const = 0;
 };
 
 struct raddr_t : public addr_t {
   reg_t reg;
+  virtual int64_t eval() const { return gr().ref(reg.regid).data.i; }
 };
 
 struct iaddr_t : public addr_t {
   int64_t imm;
+  virtual int64_t eval() const { return imm; }
+};
+
+struct rob_t {
+  struct lock_t {
+    int64_t seq;
+    bool read;
+    bool operator<(const lock_t& rhs) const { return seq < rhs.seq; }
+    lock_t(int64_t seq, bool read) : seq(seq), read(read) { }
+  };
+  std::multimap<int64_t, lock_t> gr_lock;
+  std::multimap<int64_t, lock_t> spm_begins;
+  std::multimap<int64_t, lock_t> spm_ends;
+  int64_t rob_seq = 1;
+  bool test_read(reg_t r) const {
+    return std::all_of(gr_lock.lower_bound(r.regid), gr_lock.upper_bound(r.regid), [](auto&& p){return p.second.read;});
+  }
+  bool test_write(reg_t r) const {
+    return std::none_of(gr_lock.lower_bound(r.regid), gr_lock.upper_bound(r.regid), [](auto&& p){return true;});
+  }
+  int64_t lock_read(reg_t r) {
+    return gr_lock.emplace({r.regid, lock_t(rob_seq, true)}), rob_seq++;
+  }
+  int64_t lock_write(reg_t r) {
+    return gr_lock.emplace({r.regid, lock_t(rob_seq, false)}), rob_seq++;
+  }
+  int64_t test_read(int64_t start, int64_t end) const {
+    std::multimap<int64_t, lock_t> deps;
+    std::set_intersection(
+        spm_begins.begin(), spm_begins.upper_bound(end),
+        spm_ends.lower_bound(start), spm_ends.end(),
+        std::inserter(deps), [](auto&& p1, auto&& p2){ return p1.second < p2.second; }
+    );
+    return std::all_of(deps.begin(), deps.end(), [](auto&& p){return p.second.read;});
+  }
+  int64_t test_write(int64_t start, int64_t end) const {
+    std::multimap<int64_t, lock_t> deps;
+    std::set_intersection(
+        spm_begins.begin(), spm_begins.upper_bound(end),
+        spm_ends.lower_bound(start), spm_ends.end(),
+        std::inserter(deps), [](auto&& p1, auto&& p2){ return p1.second < p2.second; }
+    );
+    return deps.empty();
+  }
+  int64_t lock_read(int64_t start, int64_t end) {
+    return spm_begins.emplace({start, lock_t(rob_seq, true)}), spm_ends.emplace({end, lock_t(rob_seq, true)}), -rob_seq++;
+  }
+  int64_t lock_write(int64_t start, int64_t end) {
+    return spm_begins.emplace({start, lock_t(rob_seq, false)}), spm_ends.emplace({end, lock_t(rob_seq, false)}), -rob_seq++;
+  }
+  void unlock(int64_t lock_seq) {
+    if (lock_seq > 0) {
+      for (auto i = gr_lock.begin(); i != gr_lock.end(); i++) {
+        if (i->second.seq == lock_seq) { gr_lock.erase(i); return; }
+      }
+    } else {
+      for (auto i = spm_begins.begin(); i != spm_begins.end(); i++) {
+        if (i->second.seq == lock_seq) { spm_begins.erase(i); break; }
+      }
+      for (auto i = spm_ends.begin(); i != spm_ends.end(); i++) {
+        if (i->second.seq == lock_seq) { spm_ends.erase(i); return; }
+      }
+    }
+  }
 };
 
 struct controller_t : public coroutine_t {
