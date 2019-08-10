@@ -2287,8 +2287,8 @@ symbol_t::ptr prob(std::shared_ptr<ast_node_t> ast) {
       }
       auto lhs = prob(ast->lhs)->to<symbol_func_t>();
       auto func = lhs ? lhs->type->to<symbol_func_type_t>() : nullptr;
-      auto arg = prob(ast->args)->to<symbol_val_t>();
-      auto args = arg->to<symbol_arglist_t>();
+      auto arg = ast->args ? prob(ast->args)->to<symbol_val_t>() : nullptr;
+      auto args = arg ? arg->to<symbol_arglist_t>() : nullptr;
       std::vector<symbol_val_t::ptr> vargs;
       std::vector<symbol_val_t::ptr> vargs_byval;
       auto stmts = std::make_shared<symbol_stmt_list_t>(ast);
