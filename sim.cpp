@@ -10,6 +10,7 @@
 #include <map>
 #include <iostream>
 #include <typeinfo>
+#include <typeindex>
 #include <cmath>
 
 using namespace std::string_literals;
@@ -44,6 +45,22 @@ template<class T1, class T2>
 bool operator+(T2 lhs, in_recieve_key_t<T1> rhs) {
   return rhs.set.find(lhs) != rhs.set.end();
 }
+
+#define is %is_recieve_ptr_t()%
+struct is_recieve_ptr_t {
+  std::type_index type1;
+  std::type_index type2;
+  operator bool() const { return type1 == type2; }
+  is_recieve_ptr_t() : type1(typeid(void)), type2(typeid(void)) {  };
+  template<class T> is_recieve_ptr_t operator%(std::shared_ptr<T> rhs)
+    { is_recieve_ptr_t ret(*this); return ret.type2 = std::type_index(typeid(*rhs)), ret; }
+  is_recieve_ptr_t operator%(const std::type_info& rhs)
+    { is_recieve_ptr_t ret(*this); return ret.type2 = std::type_index(rhs), ret; }
+};
+template<class T> is_recieve_ptr_t operator%(std::shared_ptr<T> lhs, is_recieve_ptr_t rhs)
+  { is_recieve_ptr_t ret(rhs); return ret.type1 = std::type_index(typeid(*lhs)), ret; }
+is_recieve_ptr_t operator%(const std::type_info& lhs, is_recieve_ptr_t rhs)
+  { is_recieve_ptr_t ret(rhs); return ret.type1 = std::type_index(lhs), ret; }
 
 // ===== CPULESS CHARACTERISTICS ================================================================
 
@@ -80,6 +97,8 @@ constexpr double spm_leakage = 17.7136 * 1e-3; // mW
 constexpr double spm_read_energy = 0.0561984 * 1e-9; // nJ
 constexpr double spm_write_energy = 0.0555022 * 1e-9; // nJ
 
+constexpr int64_t spm_size = 1024 * 1024;
+constexpr int64_t vq_depth = 16;
 // ================================================================ CPULESS CHARACTERISTICS =====
 
 using timestamp_t = double;
@@ -444,12 +463,23 @@ cache_t& cache() {
   return _cache;
 }
 
-struct reg_t {
-  int64_t regid;
+struct param_t {
+  using ptr = std::shared_ptr<param_t>;
+  virtual int64_t eval() const = 0;
 };
 
-struct addr_t {
-  virtual int64_t eval() const = 0;
+struct reg_t : public param_t {
+  int64_t regid;
+  virtual int64_t eval() const { return regid; }
+};
+
+struct imm_t : public param_t {
+  int64_t imm;
+  virtual int64_t eval() const { return imm; }
+};
+
+struct addr_t : public param_t {
+
 };
 
 struct raddr_t : public addr_t {
@@ -458,11 +488,11 @@ struct raddr_t : public addr_t {
 };
 
 struct iaddr_t : public addr_t {
-  int64_t imm;
-  virtual int64_t eval() const { return imm; }
+  imm_t imm;
+  virtual int64_t eval() const { return imm.eval(); }
 };
 
-struct rob_t {
+struct rob_t : public coroutine_t {
   struct lock_t {
     int64_t seq;
     bool read;
@@ -478,12 +508,6 @@ struct rob_t {
   }
   bool test_write(reg_t r) const {
     return std::none_of(gr_lock.lower_bound(r.regid), gr_lock.upper_bound(r.regid), [](auto&& p){return true;});
-  }
-  int64_t lock_read(reg_t r) {
-    return gr_lock.emplace(r.regid, lock_t(rob_seq, true)), rob_seq++;
-  }
-  int64_t lock_write(reg_t r) {
-    return gr_lock.emplace(r.regid, lock_t(rob_seq, false)), rob_seq++;
   }
   int64_t test_read(int64_t start, int64_t end) const {
     std::multimap<int64_t, lock_t> deps;
@@ -503,12 +527,6 @@ struct rob_t {
     );
     return deps.empty();
   }
-  int64_t lock_read(int64_t start, int64_t end) {
-    return spm_begins.emplace(start, lock_t(rob_seq, true)), spm_ends.emplace(end, lock_t(rob_seq, true)), -rob_seq++;
-  }
-  int64_t lock_write(int64_t start, int64_t end) {
-    return spm_begins.emplace(start, lock_t(rob_seq, false)), spm_ends.emplace(end, lock_t(rob_seq, false)), -rob_seq++;
-  }
   void unlock(int64_t lock_seq) {
     if (lock_seq > 0) {
       for (auto i = gr_lock.begin(); i != gr_lock.end(); i++) {
@@ -522,6 +540,43 @@ struct rob_t {
         if (i->second.seq == lock_seq) { spm_ends.erase(i); return; }
       }
     }
+  }
+
+  struct rob_request_t {
+    int64_t lock_seq;
+    future_t::ptr fut;
+    rob_request_t(int64_t lock_seq, future_t::ptr fut) : lock_seq(lock_seq), fut(fut) { }
+  };
+  std::list<rob_request_t> reqs;
+  async(while(1){
+    while(!reqs.empty()) {
+      await(reqs.front().fut);
+      unlock(reqs.front().lock_seq);
+      reqs.pop_front();
+    }
+    hibernate;
+  })
+  void lock_read(future_t::ptr fut, reg_t r) {
+    gr_lock.emplace(r.regid, lock_t(rob_seq, true));
+    reqs.emplace_back(rob_seq, fut);
+    rob_seq++; awake;
+  }
+  void lock_write(future_t::ptr fut, reg_t r) {
+    gr_lock.emplace(r.regid, lock_t(rob_seq, false));
+    reqs.emplace_back(rob_seq, fut);
+    rob_seq++; awake;
+  }
+  void lock_read(future_t::ptr fut, int64_t start, int64_t end) {
+    spm_begins.emplace(start, lock_t(rob_seq, true));
+    spm_ends.emplace(end, lock_t(rob_seq, true));
+    reqs.emplace_back(-rob_seq, fut);
+    rob_seq++; awake;
+  }
+  void lock_write(future_t::ptr fut, int64_t start, int64_t end) {
+    spm_begins.emplace(start, lock_t(rob_seq, false));
+    spm_ends.emplace(end, lock_t(rob_seq, false));
+    reqs.emplace_back(-rob_seq, fut);
+    rob_seq++; awake;
   }
 };
 
@@ -643,7 +698,7 @@ struct ppu_t : public coroutine_t {
         }
         // pipeline 0: ctrl
         if (mode == NONE) {
-          if (reqs.front().op in cc("act"s, "floor"s, "mulvf"s, "divvf"s, "addvf"s, "subvf"s, "subfv"s,
+          if (reqs.front().op in cc("movv"s, "movsv"s, "act"s, "floor"s, "mulvf"s, "divvf"s, "addvf"s, "subvf"s, "subfv"s,
                                "ltvf"s, "gtvf"s, "levf"s, "gevf"s, "eqvf"s, "nevf"s)) {
             mode = UNARY;
             cycles = total_cycles = (reqs.front().size[0] + line_bytes - 1) / line_bytes + 2;
@@ -714,6 +769,19 @@ struct ppu_t : public coroutine_t {
       hibernate;
     }
   )
+  future_t::ptr issue(std::string op, std::vector<param_t::ptr> args) {
+    future_t::ptr fut = future_t::new_();
+    std::vector<int64_t> size;
+    if (op in cc("pool"s, "conv"s, "mm"s, "trans"s)) {
+      for (auto&& p : args) if (p is typeid(imm_t)) size.push_back(p->eval());
+    } else if (op in cc("movsv"s)) {
+      size.push_back(line_bytes);
+    } else {
+      size.push_back(args.back()->eval());
+    }
+    reqs.emplace_back(op, size, fut); awake;
+    return fut;
+  }
 };
 
 ppu_t& ppu() {
@@ -721,24 +789,78 @@ ppu_t& ppu() {
   return _ppu;
 }
 
-struct ppu_ctrl_t : public coroutine_t {
-
+struct pdma_t : public coroutine_t {
+  struct pdma_request_t {
+    int64_t addr;
+    int64_t size;
+    bool load;
+    future_t::ptr fut;
+    pdma_request_t(int64_t addr, int64_t size, bool load, future_t::ptr fut) : addr(addr), size(size), load(load), fut(fut) { }
+  };
+  std::list<pdma_request_t> reqs;
+  std::list<future_t::ptr> hs;
+  async(while(1) {
+    while(!reqs.empty()) {
+      yield(posedge(global_time));
+      if (reqs.front().load) {
+        hs.push_back(spm(1).set(0, reqs.front().size));
+        hs.push_back(ddr().get(reqs.front().addr, reqs.front().size));
+      } else {
+        hs.push_back(spm(1).get(0, reqs.front().size));
+        hs.push_back(ddr().set(reqs.front().addr, reqs.front().size));
+      }
+      while (!hs.empty()) {
+        await(hs.front());
+        hs.pop_front();
+      }
+      finish(reqs.front().fut);
+      reqs.pop_front();
+    }
+    hibernate;
+  })
+  future_t::ptr issue(std::string op, std::vector<param_t::ptr> args) {
+    future_t::ptr fut = future_t::new_();
+    if (op == "loadv"s) {
+      reqs.emplace_back(args[1]->eval(), args[2]->eval(), true, fut);
+    } else if (op == "storev"s) {
+      reqs.emplace_back(args[0]->eval(), args[2]->eval(), false, fut);
+    } else if (op == "strideio"s) {
+      bool load = args[0]->eval() < spm_size;
+      for (int i = 0; i < args[4]->eval(); i++) {
+        reqs.emplace_back(args[load ? 0 : 1]->eval() + i * args[3]->eval(), args[2]->eval(), load,
+                          i == args[4]->eval() - 1 ? fut : nullptr);
+      }
+    }
+    awake;
+    return fut;
+  }
 };
 
+pdma_t& pdma() {
+  static pdma_t _pdma;
+  return _pdma;
+}
+
+struct inst_t {
+  std::string op;
+  std::vector<param_t::ptr> args;
+};
+
+std::list<inst_t> vq;
+
+struct pctrl_t : public coroutine_t {
+  
+};
+
+
 struct controller_t : public coroutine_t {
-  int i;
-  int j;
   bool halted;
+  int64_t pc;
+  int64_t pce;
   std::vector<future_t::ptr> hs;
-  async(for(i = 0; i < 10; i++) {
-    log(i);
-    hs.push_back(ddr().get(10000 + i * 16, 1024));
-    hs.push_back(ddr().set(10000 + i * 16 + 8, 1024));
-    hs.push_back(cache().get(i * 16, new cell_t));
-    hs.push_back(cache().set(i * 16 + 8, new cell_t));
-    for (j = 0; j < 4; j++) await(hs[j]);
-    hs.clear();
-  } halted = true;)
+  async(while(!halted){
+    
+  })
 };
 
 int main() {
