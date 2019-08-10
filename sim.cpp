@@ -2,12 +2,15 @@
 #include <cstdint>
 #include <vector>
 #include <functional>
+#include <algorithm>
 #include <memory>
 #include <queue>
 #include <list>
 #include <map>
 #include <iostream>
 #include <typeinfo>
+
+using namespace std::string_literals;
 
 // ===== CPULESS CHARACTERISTICS ================================================================
 
@@ -49,6 +52,7 @@ constexpr double spm_write_energy = 0.0555022 * 1e-9; // nJ
 using timestamp_t = double;
 timestamp_t global_time = 0;
 #define ellapse(t) (global_time+(t))
+#define posedge(t) [](timestamp_t _t){return ellapse(((_t)*frequency-std::floor((_t)*frequency))/frequency);}(t)
 
 #define log(...) do{std::cout << "[" << global_time << "] " << __VA_ARGS__ << std::endl;}while(0)
 
@@ -443,17 +447,17 @@ struct rob_t {
     return std::none_of(gr_lock.lower_bound(r.regid), gr_lock.upper_bound(r.regid), [](auto&& p){return true;});
   }
   int64_t lock_read(reg_t r) {
-    return gr_lock.emplace({r.regid, lock_t(rob_seq, true)}), rob_seq++;
+    return gr_lock.emplace(r.regid, lock_t(rob_seq, true)), rob_seq++;
   }
   int64_t lock_write(reg_t r) {
-    return gr_lock.emplace({r.regid, lock_t(rob_seq, false)}), rob_seq++;
+    return gr_lock.emplace(r.regid, lock_t(rob_seq, false)), rob_seq++;
   }
   int64_t test_read(int64_t start, int64_t end) const {
     std::multimap<int64_t, lock_t> deps;
     std::set_intersection(
         spm_begins.begin(), spm_begins.upper_bound(end),
         spm_ends.lower_bound(start), spm_ends.end(),
-        std::inserter(deps), [](auto&& p1, auto&& p2){ return p1.second < p2.second; }
+        std::inserter(deps, deps.end()), [](auto&& p1, auto&& p2){ return p1.second < p2.second; }
     );
     return std::all_of(deps.begin(), deps.end(), [](auto&& p){return p.second.read;});
   }
@@ -462,15 +466,15 @@ struct rob_t {
     std::set_intersection(
         spm_begins.begin(), spm_begins.upper_bound(end),
         spm_ends.lower_bound(start), spm_ends.end(),
-        std::inserter(deps), [](auto&& p1, auto&& p2){ return p1.second < p2.second; }
+        std::inserter(deps, deps.end()), [](auto&& p1, auto&& p2){ return p1.second < p2.second; }
     );
     return deps.empty();
   }
   int64_t lock_read(int64_t start, int64_t end) {
-    return spm_begins.emplace({start, lock_t(rob_seq, true)}), spm_ends.emplace({end, lock_t(rob_seq, true)}), -rob_seq++;
+    return spm_begins.emplace(start, lock_t(rob_seq, true)), spm_ends.emplace(end, lock_t(rob_seq, true)), -rob_seq++;
   }
   int64_t lock_write(int64_t start, int64_t end) {
-    return spm_begins.emplace({start, lock_t(rob_seq, false)}), spm_ends.emplace({end, lock_t(rob_seq, false)}), -rob_seq++;
+    return spm_begins.emplace(start, lock_t(rob_seq, false)), spm_ends.emplace(end, lock_t(rob_seq, false)), -rob_seq++;
   }
   void unlock(int64_t lock_seq) {
     if (lock_seq > 0) {
@@ -485,6 +489,74 @@ struct rob_t {
         if (i->second.seq == lock_seq) { spm_ends.erase(i); return; }
       }
     }
+  }
+};
+
+rob_t& rob() {
+  static rob_t _rob;
+  return _rob;
+}
+
+struct spu_t : public coroutine_t {
+  struct spu_request_t {
+    std::string op;
+    cell_t* dest;
+    cell_t lhs;
+    cell_t rhs;
+    future_t::ptr fut;
+    spu_request_t() = default;
+    spu_request_t(std::string op, cell_t* dest, cell_t lhs, cell_t rhs, future_t::ptr fut) : op(op), dest(dest), lhs(lhs), rhs(rhs), fut(fut) { }
+  };
+  virtual int exec(spu_request_t& req) {
+    std::unordered_map<std::string, int(*)(cell_t*,cell_t,cell_t)> ops {
+      { "cvtif"s, +[](cell_t* d, cell_t l, cell_t r){ return d->data.f = l.data.i, 1; } },
+      { "cvtfi"s, +[](cell_t* d, cell_t l, cell_t r){ return d->data.i = l.data.f, 1; } },
+      { "muli"s, +[](cell_t* d, cell_t l, cell_t r){ return d->data.i = l.data.i * r.data.i, 1; } },
+      { "mulf"s, +[](cell_t* d, cell_t l, cell_t r){ return d->data.f = l.data.f * r.data.f, 1; } },
+      { "divi"s, +[](cell_t* d, cell_t l, cell_t r){ return d->data.i = l.data.i / r.data.i, 1; } },
+      { "divf"s, +[](cell_t* d, cell_t l, cell_t r){ return d->data.f = l.data.f / r.data.f, 1; } },
+      { "modi"s, +[](cell_t* d, cell_t l, cell_t r){ return d->data.i = l.data.i % r.data.i, 1; } },
+      { "addi"s, +[](cell_t* d, cell_t l, cell_t r){ return d->data.i = l.data.i + r.data.i, 1; } },
+      { "addf"s, +[](cell_t* d, cell_t l, cell_t r){ return d->data.f = l.data.f + r.data.f, 1; } },
+      { "subi"s, +[](cell_t* d, cell_t l, cell_t r){ return d->data.i = l.data.i - r.data.i, 1; } },
+      { "subf"s, +[](cell_t* d, cell_t l, cell_t r){ return d->data.f = l.data.f - r.data.f, 1; } },
+      { "shli"s, +[](cell_t* d, cell_t l, cell_t r){ return d->data.i = l.data.i << r.data.i, 1; } },
+      { "shri"s, +[](cell_t* d, cell_t l, cell_t r){ return d->data.i = l.data.i >> r.data.i, 1; } },
+      { "lti"s, +[](cell_t* d, cell_t l, cell_t r){ return d->data.i = l.data.i < r.data.i, 1; } },
+      { "ltf"s, +[](cell_t* d, cell_t l, cell_t r){ return d->data.i = l.data.f < r.data.f, 1; } },
+      { "gti"s, +[](cell_t* d, cell_t l, cell_t r){ return d->data.i = l.data.i > r.data.i, 1; } },
+      { "gtf"s, +[](cell_t* d, cell_t l, cell_t r){ return d->data.i = l.data.f > r.data.f, 1; } },
+      { "lei"s, +[](cell_t* d, cell_t l, cell_t r){ return d->data.i = l.data.i <= r.data.i, 1; } },
+      { "lef"s, +[](cell_t* d, cell_t l, cell_t r){ return d->data.i = l.data.f <= r.data.f, 1; } },
+      { "gei"s, +[](cell_t* d, cell_t l, cell_t r){ return d->data.i = l.data.i >= r.data.i, 1; } },
+      { "gef"s, +[](cell_t* d, cell_t l, cell_t r){ return d->data.i = l.data.f >= r.data.f, 1; } },
+      { "eqi"s, +[](cell_t* d, cell_t l, cell_t r){ return d->data.i = l.data.i == r.data.i, 1; } },
+      { "eqf"s, +[](cell_t* d, cell_t l, cell_t r){ return d->data.i = l.data.f == r.data.f, 1; } },
+      { "nei"s, +[](cell_t* d, cell_t l, cell_t r){ return d->data.i = l.data.i != r.data.i, 1; } },
+      { "nef"s, +[](cell_t* d, cell_t l, cell_t r){ return d->data.i = l.data.f != r.data.f, 1; } },
+      { "andi"s, +[](cell_t* d, cell_t l, cell_t r){ return d->data.i = l.data.i & r.data.i, 1; } },
+      { "xori"s, +[](cell_t* d, cell_t l, cell_t r){ return d->data.i = l.data.i ^ r.data.i, 1; } },
+      { "ori"s, +[](cell_t* d, cell_t l, cell_t r){ return d->data.i = l.data.i | r.data.i, 1; } },
+      { "noti"s, +[](cell_t* d, cell_t l, cell_t r){ return d->data.i = ~l.data.i, 1; } },
+    };
+    return ops[req.op](req.dest, req.lhs, req.rhs);
+  }
+  std::list<spu_request_t> reqs;
+  async(
+    while(1) {
+      while(!reqs.empty()) {
+        yield(posedge(global_time));
+        yield(posedge(ellapse(exec(reqs.front()) * (1. / frequency))));
+        finish(reqs.front().fut);
+        reqs.pop_front();
+      }
+      hibernate;
+    }
+  )
+  future_t::ptr issue(std::string op, cell_t* dest, cell_t lhs, cell_t rhs) {
+    future_t::ptr fut = future_t::new_();
+    reqs.emplace_back(op, dest, lhs, rhs, fut); awake;
+    return fut;
   }
 };
 
