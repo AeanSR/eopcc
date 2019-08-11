@@ -4117,8 +4117,8 @@ void exec(symbol_stmt_t::ptr stmt) {
         auto arg = eval(o);
         switch(arg.index()) {
         case 0: pinst("print", "<null>"); break;
-        case 1: pinst("print", std::get<reg_t>(arg)); break;
-        case 2: pinst("print", std::get<addr_t::ptr>(arg)->opr(stmt)); break;
+        case 1: pinst((o->type is typeid(symbol_float_type_t) ? "printf"s : "print"s), std::get<reg_t>(arg)); break;
+        case 2: pinst((o->type is typeid(symbol_float_type_t) ? "printf"s : "print"s), std::get<addr_t::ptr>(arg)->opr(stmt)); break;
         case 3: pinst("print", "<function>"); break;
         case 4: pinst("print", std::get<std::string>(arg)); break;
         }
