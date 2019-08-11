@@ -499,6 +499,12 @@ struct iaddr_t : public addr_t {
   virtual int64_t eval() const { return imm.eval(); }
 };
 
+struct output_t : public param_t {
+  std::string content;
+  // TODO(): print information
+  virtual int64_t eval() const { return 0; }
+};
+
 struct rob_t : public coroutine_t {
   struct lock_t {
     int64_t seq;
@@ -1036,7 +1042,8 @@ bool is_number_in_readraw(char s[]) {
   return true;
 }
 
-int readraw(std::vector<inst_t> &main_inst, std::vector<inst_t> &except_inst, char filename[] = "eop.out") {
+int readraw(std::vector<inst_t> &main_inst, std::vector<inst_t> &except_inst, const char filename[]) {
+  #define str2int64(t_) strtol(t_, NULL, 10)
   FILE *fpin;
   if ((fpin=fopen(filename,"r")) == NULL) {
     std::cout << "[ERROR] No input src " << filename << std::endl;
@@ -1059,7 +1066,7 @@ int readraw(std::vector<inst_t> &main_inst, std::vector<inst_t> &except_inst, ch
     }
     if (is_number_in_readraw(input_str)) {
       // PC
-      int pc = atoi(input_str);
+      int64_t pc = str2int64(input_str);
       std::string op;
       std::vector<param_t::ptr> args;
       (*now).push_back(inst_t(pc, op, args));
@@ -1069,7 +1076,7 @@ int readraw(std::vector<inst_t> &main_inst, std::vector<inst_t> &except_inst, ch
         std::cout << "ERROR in" << __LINE__ << input_str <<std::endl;
       char tmp_[1024];
       strcpy(tmp_, input_str + 5);
-      int num_ = atoi(tmp_);
+      int64_t num_ = str2int64(tmp_);
       if (input_str[4] == '#') {
         imm_t t_; std::shared_ptr<iaddr_t> addr_ = std::make_shared<iaddr_t>();
         t_.imm = num_; addr_->imm = t_;
@@ -1083,7 +1090,7 @@ int readraw(std::vector<inst_t> &main_inst, std::vector<inst_t> &except_inst, ch
       // #XXX or rXXX or !XXX
       char tmp_[1024];
       strcpy(tmp_, input_str + 5);
-      int num_ = atoi(tmp_);
+      int64_t num_ = str2int64(tmp_);
       if (input_str[0] == 'r') {
         std::shared_ptr<reg_t> t_ = std::make_shared<reg_t>();
         t_->regid = num_;
@@ -1093,9 +1100,18 @@ int readraw(std::vector<inst_t> &main_inst, std::vector<inst_t> &except_inst, ch
         t_->imm = num_;
         (*now).back().args.push_back(t_);
       }
-    } else if (atoi(input_str) > 0) {
-      std::cout << "print!!!" << std::endl;
-      ;
+    } else if (str2int64(input_str) > 0) {
+      int i = 0;
+      for (i = 0; i < strlen(input_str); i++) {
+        if (input_str[i] <= '9' and input_str[i] >= '0')
+            continue;
+        if (input_str[i] == 's')
+            break;
+      }
+      std::shared_ptr<output_t> output_ = std::make_shared<output_t>();
+      output_->content = std::string(input_str + i + 1);
+      // std::cout << output_->content << std::endl;
+      (*now).back().args.push_back(output_);
     } else {
       (*now).back().op = std::string(input_str);
     }
@@ -1136,7 +1152,7 @@ int main() {
 
   std::vector<inst_t> main_inst;
   std::vector<inst_t> except_inst;
-  readraw(main_inst, except_inst, "eop.out");
+  readraw(main_inst, except_inst, std::string("eop.out").c_str());
   printf("%d %d\n", main_inst.size(), except_inst.size());
   checkinput(main_inst, except_inst);
 
