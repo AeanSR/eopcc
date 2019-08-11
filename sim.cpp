@@ -471,39 +471,93 @@ cache_t& cache() {
 struct param_t {
   using ptr = std::shared_ptr<param_t>;
   virtual int64_t eval() const = 0;
+  virtual int visualizing() const = 0;
 };
 
 struct reg_t : public param_t {
   int64_t regid;
   virtual int64_t eval() const { return regid; }
+  friend std::ostream &operator<<(std::ostream &out, const reg_t &t);
+  virtual int visualizing() const { std::cout << *this; return 0; }
   reg_t(int64_t regid) : regid(regid) { }
   reg_t() : regid(0) { }
 };
 
 struct imm_t : public param_t {
+  ;
+};
+
+// int imm_t
+struct iimm_t : public imm_t {
   int64_t imm;
   virtual int64_t eval() const { return imm; }
+  friend std::ostream &operator<<(std::ostream &out, const iimm_t &t);
+  virtual int visualizing() const { std::cout << *this; return 0; }
+};
+
+// float imm_t
+struct fimm_t : public imm_t {
+  double imm;
+  virtual int64_t eval() const { return imm; }
+  friend std::ostream &operator<<(std::ostream &out, const fimm_t &t);
+  virtual int visualizing() const { std::cout << *this; return 0; }
 };
 
 struct addr_t : public param_t {
-
+  ;
 };
 
 struct raddr_t : public addr_t {
   reg_t reg;
   virtual int64_t eval() const { return gr().ref(reg.regid).data.i; }
+  friend std::ostream &operator<<(std::ostream &out, const raddr_t &t);
+  virtual int visualizing() const { std::cout << *this; return 0; }
 };
 
 struct iaddr_t : public addr_t {
-  imm_t imm;
+  iimm_t imm;
   virtual int64_t eval() const { return imm.eval(); }
+  friend std::ostream &operator<<(std::ostream &out, const iaddr_t &t);
+  virtual int visualizing() const { std::cout << *this; return 0; }
 };
 
 struct output_t : public param_t {
   std::string content;
   // TODO(): print information
   virtual int64_t eval() const { return 0; }
+  friend std::ostream &operator<<(std::ostream &out, const output_t &t);
+  virtual int visualizing() const { std::cout << *this; return 0; }
 };
+// reg_t:   rX
+std::ostream & operator << (std::ostream &os, const reg_t &t) {
+  std::cout << "r" << t.regid;
+  return os;
+}
+// iimm_t:   #X
+std::ostream & operator << (std::ostream &os, const iimm_t &t) {
+  std::cout << "#" << t.imm;
+  return os;
+}
+// fimm_t:   #X
+std::ostream & operator << (std::ostream &os, const fimm_t &t) {
+  std::cout << "#" << t.imm;
+  return os;
+}
+// raddr_t: ptr/rX
+std::ostream & operator << (std::ostream &os, const raddr_t &t) {
+  std::cout << "ptr/" << t.reg;
+  return os;
+}
+// raddr_t: ptr/#X
+std::ostream & operator << (std::ostream &os, const iaddr_t &t) {
+  std::cout << "ptr/" << t.imm;
+  return os;
+}
+// output_t: XXX
+std::ostream & operator << (std::ostream &os, const output_t &t) {
+  std::cout << t.content;
+  return os;
+}
 
 struct rob_t : public coroutine_t {
   struct lock_t {
@@ -1037,7 +1091,7 @@ struct controller_t : public coroutine_t {
 bool is_number_in_readraw(char s[]) {
   // [0-9][0-9]*
   for (int i = 0; i < strlen(s); i++)
-    if (s[i] > '9' or s[i] < '0')
+    if ((s[i] > '9' or s[i] < '0') and s[i] != '-' and s[i] != '+')
       return false;
   return true;
 }
@@ -1078,7 +1132,7 @@ int readraw(std::vector<inst_t> &main_inst, std::vector<inst_t> &except_inst, co
       strcpy(tmp_, input_str + 5);
       int64_t num_ = str2int64(tmp_);
       if (input_str[4] == '#') {
-        imm_t t_; std::shared_ptr<iaddr_t> addr_ = std::make_shared<iaddr_t>();
+        iimm_t t_; std::shared_ptr<iaddr_t> addr_ = std::make_shared<iaddr_t>();
         t_.imm = num_; addr_->imm = t_;
         (*now).back().args.push_back(addr_);
       } else {
@@ -1089,16 +1143,24 @@ int readraw(std::vector<inst_t> &main_inst, std::vector<inst_t> &except_inst, co
     } else if (input_str[0] == '#' or input_str[0] == 'r' or input_str[0] == '!') {
       // #XXX or rXXX or !XXX
       char tmp_[1024];
-      strcpy(tmp_, input_str + 5);
-      int64_t num_ = str2int64(tmp_);
+      strcpy(tmp_, input_str + 1);
       if (input_str[0] == 'r') {
+        int64_t num_ = str2int64(tmp_);
         std::shared_ptr<reg_t> t_ = std::make_shared<reg_t>();
         t_->regid = num_;
         (*now).back().args.push_back(t_);
       } else {
-        std::shared_ptr<imm_t> t_ = std::make_shared<imm_t>();
-        t_->imm = num_;
-        (*now).back().args.push_back(t_);
+        if ((*now).back().op != std::string("movfs")) {
+          int64_t num_ = str2int64(tmp_);
+          std::shared_ptr<iimm_t> t_ = std::make_shared<iimm_t>();
+          t_->imm = num_;
+          (*now).back().args.push_back(t_);
+        } else {
+          double num_  = atof(tmp_);
+          std::shared_ptr<fimm_t> t_ = std::make_shared<fimm_t>();
+          t_->imm = num_;
+          (*now).back().args.push_back(t_);
+        }
       }
     } else if (str2int64(input_str) > 0) {
       int i = 0;
@@ -1123,9 +1185,11 @@ int visualizing_in_checkinput(const std::vector<inst_t> inst) {
   for (size_t i = 0; i < inst.size(); i++) {
     printf("  %d ", inst[i].pc);
     std::cout << inst[i].op;
-    // for (size_t j = 0; j < inst[i].args.size(); j++) {
-    //   if inst[i].args[j]
-    printf("\n");
+    for (size_t j = 0; j < inst[i].args.size(); j++) {
+       std::cout << " ";
+       inst[i].args[j]->visualizing();
+    }
+    std::cout << std::endl;
   }
   return 0;
 }
