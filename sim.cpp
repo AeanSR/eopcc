@@ -1,4 +1,7 @@
 #include <variant>
+#include <cctype>
+#include <cstdio>
+#include <cstring>
 #include <cstdint>
 #include <vector>
 #include <functional>
@@ -13,7 +16,7 @@
 #include <typeindex>
 #include <cmath>
 
-#include "data_loader.h"
+// #include "data_loader.h"
 
 using namespace std::string_literals;
 
@@ -28,7 +31,7 @@ struct in_recieve_key_t {
 };
 
 struct in_recieve_set_t {
-  
+
 };
 
 template<class T>
@@ -844,8 +847,10 @@ pdma_t& pdma() {
 }
 
 struct inst_t {
+  int pc;
   std::string op;
   std::vector<param_t::ptr> args;
+  inst_t(int pc_, std::string op_, std::vector<param_t::ptr> args_) : pc(pc_), op(op_), args(args_) {}
 };
 
 struct vq_t : public coroutine_t {
@@ -1017,9 +1022,103 @@ struct controller_t : public coroutine_t {
   int64_t pce;
   std::vector<future_t::ptr> hs;
   async(while(!halted){
-    
+
   })
 };
+
+bool is_number_in_readraw(char s[]) {
+  // [0-9][0-9]*
+  for (int i = 0; i < strlen(s); i++)
+    if (s[i] > '9' or s[i] < '0')
+      return false;
+  return true;
+}
+
+int readraw(std::vector<inst_t> &main_inst, std::vector<inst_t> &except_inst, char filename[] = "eop.out") {
+  FILE *fpin;
+  if ((fpin=fopen(filename,"r")) == NULL) {
+    std::cout << "[ERROR] No input src " << filename << std::endl;
+    exit(-1);
+  }
+  char input_str[1024];
+  int pc;
+  std::string op;
+  std::vector<inst_t> *now = &main_inst;
+
+  while(fscanf(fpin, "%s", input_str) != EOF) {
+    if (strcmp(input_str, "main:") == 0) {
+      std::cout << "main inst" << std::endl;
+      continue;
+    }
+    if (strcmp(input_str, "except:") == 0) {
+      std::cout << "except inst" << std::endl;
+      now = &except_inst;
+      continue;
+    }
+    if (is_number_in_readraw(input_str)) {
+      // PC
+      int pc = atoi(input_str);
+      std::string op;
+      std::vector<param_t::ptr> args;
+      (*now).push_back(inst_t(pc, op, args));
+    } else if (input_str[0] == 'p' and input_str[1] == 't') {
+      // ptr/#XXX or ptr/rXXX
+      if (strlen(input_str) <= 5)
+        std::cout << "ERROR in" << __LINE__ << input_str <<std::endl;
+      char tmp_[1024];
+      strcpy(tmp_, input_str + 5);
+      int num_ = atoi(tmp_);
+      if (input_str[4] == '#') {
+        imm_t t_; std::shared_ptr<iaddr_t> addr_ = std::make_shared<iaddr_t>();
+        t_.imm = num_; addr_->imm = t_;
+        (*now).back().args.push_back(addr_);
+      } else {
+        reg_t t_; std::shared_ptr<raddr_t> addr_ = std::make_shared<raddr_t>();
+        t_.regid = num_; addr_->reg = t_;
+        (*now).back().args.push_back(addr_);
+      }
+    } else if (input_str[0] == '#' or input_str[0] == 'r' or input_str[0] == '!') {
+      // #XXX or rXXX or !XXX
+      char tmp_[1024];
+      strcpy(tmp_, input_str + 5);
+      int num_ = atoi(tmp_);
+      if (input_str[0] == 'r') {
+        std::shared_ptr<reg_t> t_ = std::make_shared<reg_t>();
+        t_->regid = num_;
+        (*now).back().args.push_back(t_);
+      } else {
+        std::shared_ptr<imm_t> t_ = std::make_shared<imm_t>();
+        t_->imm = num_;
+        (*now).back().args.push_back(t_);
+      }
+    } else if (atoi(input_str) > 0) {
+      std::cout << "print!!!" << std::endl;
+      ;
+    } else {
+      (*now).back().op = std::string(input_str);
+    }
+  }
+  return 0;
+}
+
+int visualizing_in_checkinput(const std::vector<inst_t> inst) {
+  for (size_t i = 0; i < inst.size(); i++) {
+    printf("  %d ", inst[i].pc);
+    std::cout << inst[i].op;
+    // for (size_t j = 0; j < inst[i].args.size(); j++) {
+    //   if inst[i].args[j]
+    printf("\n");
+  }
+  return 0;
+}
+
+int checkinput(const std::vector<inst_t> main_inst, const std::vector<inst_t> except_inst) {
+  printf("main:\n");
+  visualizing_in_checkinput(main_inst);
+  printf("except:\n");
+  visualizing_in_checkinput(except_inst);
+  return 0;
+}
 
 int main() {
   controller_t controller;
@@ -1032,5 +1131,12 @@ int main() {
       e.callback->operator()();
     }
   }
+
+  std::vector<inst_t> main_inst;
+  std::vector<inst_t> except_inst;
+  readraw(main_inst, except_inst, "eop.out");
+  printf("%d %d\n", main_inst.size(), except_inst.size());
+  checkinput(main_inst, except_inst);
+
   return 0;
 }
