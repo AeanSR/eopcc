@@ -2,12 +2,67 @@
 #include <cstdint>
 #include <vector>
 #include <functional>
+#include <algorithm>
 #include <memory>
 #include <queue>
 #include <list>
+#include <set>
 #include <map>
 #include <iostream>
 #include <typeinfo>
+#include <typeindex>
+#include <cmath>
+
+#include "data_loader.h"
+
+using namespace std::string_literals;
+
+#define in +in_recieve_set_t()*
+#define contains *in_recieve_set_t()+
+#define cc(...) std::set<decltype(__VA_ARGS__)>({__VA_ARGS__})
+
+template<class T>
+struct in_recieve_key_t {
+  T set;
+  in_recieve_key_t(T set) : set(set) { }
+};
+
+struct in_recieve_set_t {
+  
+};
+
+template<class T>
+in_recieve_key_t<T> operator*(in_recieve_set_t lhs, T rhs) {
+  return in_recieve_key_t<T>(rhs);
+}
+template<class T>
+in_recieve_key_t<T> operator*(T lhs, in_recieve_set_t rhs) {
+  return in_recieve_key_t<T>(lhs);
+}
+template<class T1, class T2>
+bool operator+(in_recieve_key_t<T1> lhs, T2 rhs) {
+  return lhs.set.find(rhs) != lhs.set.end();
+}
+template<class T1, class T2>
+bool operator+(T2 lhs, in_recieve_key_t<T1> rhs) {
+  return rhs.set.find(lhs) != rhs.set.end();
+}
+
+#define is %is_recieve_ptr_t()%
+struct is_recieve_ptr_t {
+  std::type_index type1;
+  std::type_index type2;
+  operator bool() const { return type1 == type2; }
+  is_recieve_ptr_t() : type1(typeid(void)), type2(typeid(void)) {  };
+  template<class T> is_recieve_ptr_t operator%(std::shared_ptr<T> rhs)
+    { is_recieve_ptr_t ret(*this); return ret.type2 = std::type_index(typeid(*rhs)), ret; }
+  is_recieve_ptr_t operator%(const std::type_info& rhs)
+    { is_recieve_ptr_t ret(*this); return ret.type2 = std::type_index(rhs), ret; }
+};
+template<class T> is_recieve_ptr_t operator%(std::shared_ptr<T> lhs, is_recieve_ptr_t rhs)
+  { is_recieve_ptr_t ret(rhs); return ret.type1 = std::type_index(typeid(*lhs)), ret; }
+is_recieve_ptr_t operator%(const std::type_info& lhs, is_recieve_ptr_t rhs)
+  { is_recieve_ptr_t ret(rhs); return ret.type1 = std::type_index(lhs), ret; }
 
 // ===== CPULESS CHARACTERISTICS ================================================================
 
@@ -44,11 +99,14 @@ constexpr double spm_leakage = 17.7136 * 1e-3; // mW
 constexpr double spm_read_energy = 0.0561984 * 1e-9; // nJ
 constexpr double spm_write_energy = 0.0555022 * 1e-9; // nJ
 
+constexpr int64_t spm_size = 1024 * 1024;
+constexpr int64_t vq_depth = 16;
 // ================================================================ CPULESS CHARACTERISTICS =====
 
 using timestamp_t = double;
 timestamp_t global_time = 0;
 #define ellapse(t) (global_time+(t))
+#define posedge(t) [](timestamp_t _t){return ellapse(((_t)*frequency-std::floor((_t)*frequency))/frequency);}(t)
 
 #define log(...) do{std::cout << "[" << global_time << "] " << __VA_ARGS__ << std::endl;}while(0)
 
@@ -226,11 +284,11 @@ struct io_t : public coroutine_t {
   future_t::ptr get(int64_t addr, cell_t* data) {
     future_t::ptr fut = future_t::new_();
     if (sleep) {
-      gets.emplace_back(addr, gr().word_size, data, fut); awake;
+      gets.emplace_back(addr, line_bytes, data, fut); awake;
       return fut;
     } else {
       *data = mem()->ref(addr);
-      auto time = get_exec(get_request_t(addr, gr().word_size, data, fut));
+      auto time = get_exec(get_request_t(addr, line_bytes, data, fut));
       if (get_finish)
         get_finish += time;
       finish_at(fut, ellapse(time));
@@ -240,11 +298,11 @@ struct io_t : public coroutine_t {
   future_t::ptr set(int64_t addr, cell_t* data) {
     future_t::ptr fut = future_t::new_();
     if (sleep) {
-      sets.emplace_back(addr, gr().word_size, data, fut); awake;
+      sets.emplace_back(addr, line_bytes, data, fut); awake;
       return fut;
     } else {
       mem()->ref(addr) = *data;
-      auto time = set_exec(set_request_t(addr, gr().word_size, data, nullptr));
+      auto time = set_exec(set_request_t(addr, line_bytes, data, nullptr));
       if (set_finish)
         set_finish += time;
       finish_at(fut, ellapse(time));
@@ -283,7 +341,7 @@ struct spm_io_t : public io_t {
   virtual bool duplex() const { return true; }
   virtual abstract_mem_t* mem() { return &data_array; }
   virtual timestamp_t get_exec(get_request_t req) {
-    return (req.size + line_bytes - 1) / line_bytes / frequency;
+    return (req.size + line_bytes - 1) / line_bytes / frequency / 2.;
   }
   virtual timestamp_t set_exec(set_request_t req) {
     return (req.size + line_bytes - 1) / line_bytes / frequency;
@@ -407,36 +465,404 @@ cache_t& cache() {
   return _cache;
 }
 
-struct reg_t {
-  int64_t regid;
+struct param_t {
+  using ptr = std::shared_ptr<param_t>;
+  virtual int64_t eval() const = 0;
 };
 
-struct addr_t {
-  
+struct reg_t : public param_t {
+  int64_t regid;
+  virtual int64_t eval() const { return regid; }
+};
+
+struct imm_t : public param_t {
+  int64_t imm;
+  virtual int64_t eval() const { return imm; }
+};
+
+struct addr_t : public param_t {
+
 };
 
 struct raddr_t : public addr_t {
   reg_t reg;
+  virtual int64_t eval() const { return gr().ref(reg.regid).data.i; }
 };
 
 struct iaddr_t : public addr_t {
-  int64_t imm;
+  imm_t imm;
+  virtual int64_t eval() const { return imm.eval(); }
 };
 
+struct rob_t : public coroutine_t {
+  struct lock_t {
+    int64_t seq;
+    bool read;
+    bool operator<(const lock_t& rhs) const { return seq < rhs.seq; }
+    lock_t(int64_t seq, bool read) : seq(seq), read(read) { }
+  };
+  std::multimap<int64_t, lock_t> gr_lock;
+  std::multimap<int64_t, lock_t> spm_begins;
+  std::multimap<int64_t, lock_t> spm_ends;
+  int64_t rob_seq = 1;
+  bool test_read(reg_t r) const {
+    return std::all_of(gr_lock.lower_bound(r.regid), gr_lock.upper_bound(r.regid), [](auto&& p){return p.second.read;});
+  }
+  bool test_write(reg_t r) const {
+    return std::none_of(gr_lock.lower_bound(r.regid), gr_lock.upper_bound(r.regid), [](auto&& p){return true;});
+  }
+  int64_t test_read(int64_t start, int64_t end) const {
+    std::multimap<int64_t, lock_t> deps;
+    std::set_intersection(
+        spm_begins.begin(), spm_begins.upper_bound(end),
+        spm_ends.lower_bound(start), spm_ends.end(),
+        std::inserter(deps, deps.end()), [](auto&& p1, auto&& p2){ return p1.second < p2.second; }
+    );
+    return std::all_of(deps.begin(), deps.end(), [](auto&& p){return p.second.read;});
+  }
+  int64_t test_write(int64_t start, int64_t end) const {
+    std::multimap<int64_t, lock_t> deps;
+    std::set_intersection(
+        spm_begins.begin(), spm_begins.upper_bound(end),
+        spm_ends.lower_bound(start), spm_ends.end(),
+        std::inserter(deps, deps.end()), [](auto&& p1, auto&& p2){ return p1.second < p2.second; }
+    );
+    return deps.empty();
+  }
+  void unlock(int64_t lock_seq) {
+    if (lock_seq > 0) {
+      for (auto i = gr_lock.begin(); i != gr_lock.end(); i++) {
+        if (i->second.seq == lock_seq) { gr_lock.erase(i); return; }
+      }
+    } else {
+      for (auto i = spm_begins.begin(); i != spm_begins.end(); i++) {
+        if (i->second.seq == lock_seq) { spm_begins.erase(i); break; }
+      }
+      for (auto i = spm_ends.begin(); i != spm_ends.end(); i++) {
+        if (i->second.seq == lock_seq) { spm_ends.erase(i); return; }
+      }
+    }
+  }
+
+  struct rob_request_t {
+    int64_t lock_seq;
+    future_t::ptr fut;
+    rob_request_t(int64_t lock_seq, future_t::ptr fut) : lock_seq(lock_seq), fut(fut) { }
+  };
+  std::list<rob_request_t> reqs;
+  async(while(1){
+    while(!reqs.empty()) {
+      await(reqs.front().fut);
+      unlock(reqs.front().lock_seq);
+      reqs.pop_front();
+    }
+    hibernate;
+  })
+  void lock_read(future_t::ptr fut, reg_t r) {
+    gr_lock.emplace(r.regid, lock_t(rob_seq, true));
+    reqs.emplace_back(rob_seq, fut);
+    rob_seq++; awake;
+  }
+  void lock_write(future_t::ptr fut, reg_t r) {
+    gr_lock.emplace(r.regid, lock_t(rob_seq, false));
+    reqs.emplace_back(rob_seq, fut);
+    rob_seq++; awake;
+  }
+  void lock_read(future_t::ptr fut, int64_t start, int64_t end) {
+    spm_begins.emplace(start, lock_t(rob_seq, true));
+    spm_ends.emplace(end, lock_t(rob_seq, true));
+    reqs.emplace_back(-rob_seq, fut);
+    rob_seq++; awake;
+  }
+  void lock_write(future_t::ptr fut, int64_t start, int64_t end) {
+    spm_begins.emplace(start, lock_t(rob_seq, false));
+    spm_ends.emplace(end, lock_t(rob_seq, false));
+    reqs.emplace_back(-rob_seq, fut);
+    rob_seq++; awake;
+  }
+};
+
+rob_t& rob() {
+  static rob_t _rob;
+  return _rob;
+}
+
+struct spu_t : public coroutine_t {
+  struct spu_request_t {
+    std::string op;
+    cell_t* dest;
+    cell_t lhs;
+    cell_t rhs;
+    future_t::ptr fut;
+    spu_request_t() = default;
+    spu_request_t(std::string op, cell_t* dest, cell_t lhs, cell_t rhs, future_t::ptr fut) : op(op), dest(dest), lhs(lhs), rhs(rhs), fut(fut) { }
+  };
+  virtual int exec(spu_request_t& req) {
+    std::unordered_map<std::string, int(*)(cell_t*,cell_t,cell_t)> ops {
+      { "cvtif"s, +[](cell_t* d, cell_t l, cell_t r){ return d->data.f = l.data.i, 1; } },
+      { "cvtfi"s, +[](cell_t* d, cell_t l, cell_t r){ return d->data.i = l.data.f, 1; } },
+      { "muli"s, +[](cell_t* d, cell_t l, cell_t r){ return d->data.i = l.data.i * r.data.i, 1; } },
+      { "mulf"s, +[](cell_t* d, cell_t l, cell_t r){ return d->data.f = l.data.f * r.data.f, 1; } },
+      { "divi"s, +[](cell_t* d, cell_t l, cell_t r){ return d->data.i = l.data.i / r.data.i, 1; } },
+      { "divf"s, +[](cell_t* d, cell_t l, cell_t r){ return d->data.f = l.data.f / r.data.f, 1; } },
+      { "modi"s, +[](cell_t* d, cell_t l, cell_t r){ return d->data.i = l.data.i % r.data.i, 1; } },
+      { "addi"s, +[](cell_t* d, cell_t l, cell_t r){ return d->data.i = l.data.i + r.data.i, 1; } },
+      { "addf"s, +[](cell_t* d, cell_t l, cell_t r){ return d->data.f = l.data.f + r.data.f, 1; } },
+      { "subi"s, +[](cell_t* d, cell_t l, cell_t r){ return d->data.i = l.data.i - r.data.i, 1; } },
+      { "subf"s, +[](cell_t* d, cell_t l, cell_t r){ return d->data.f = l.data.f - r.data.f, 1; } },
+      { "shli"s, +[](cell_t* d, cell_t l, cell_t r){ return d->data.i = l.data.i << r.data.i, 1; } },
+      { "shri"s, +[](cell_t* d, cell_t l, cell_t r){ return d->data.i = l.data.i >> r.data.i, 1; } },
+      { "lti"s, +[](cell_t* d, cell_t l, cell_t r){ return d->data.i = l.data.i < r.data.i, 1; } },
+      { "ltf"s, +[](cell_t* d, cell_t l, cell_t r){ return d->data.i = l.data.f < r.data.f, 1; } },
+      { "gti"s, +[](cell_t* d, cell_t l, cell_t r){ return d->data.i = l.data.i > r.data.i, 1; } },
+      { "gtf"s, +[](cell_t* d, cell_t l, cell_t r){ return d->data.i = l.data.f > r.data.f, 1; } },
+      { "lei"s, +[](cell_t* d, cell_t l, cell_t r){ return d->data.i = l.data.i <= r.data.i, 1; } },
+      { "lef"s, +[](cell_t* d, cell_t l, cell_t r){ return d->data.i = l.data.f <= r.data.f, 1; } },
+      { "gei"s, +[](cell_t* d, cell_t l, cell_t r){ return d->data.i = l.data.i >= r.data.i, 1; } },
+      { "gef"s, +[](cell_t* d, cell_t l, cell_t r){ return d->data.i = l.data.f >= r.data.f, 1; } },
+      { "eqi"s, +[](cell_t* d, cell_t l, cell_t r){ return d->data.i = l.data.i == r.data.i, 1; } },
+      { "eqf"s, +[](cell_t* d, cell_t l, cell_t r){ return d->data.i = l.data.f == r.data.f, 1; } },
+      { "nei"s, +[](cell_t* d, cell_t l, cell_t r){ return d->data.i = l.data.i != r.data.i, 1; } },
+      { "nef"s, +[](cell_t* d, cell_t l, cell_t r){ return d->data.i = l.data.f != r.data.f, 1; } },
+      { "andi"s, +[](cell_t* d, cell_t l, cell_t r){ return d->data.i = l.data.i & r.data.i, 1; } },
+      { "xori"s, +[](cell_t* d, cell_t l, cell_t r){ return d->data.i = l.data.i ^ r.data.i, 1; } },
+      { "ori"s, +[](cell_t* d, cell_t l, cell_t r){ return d->data.i = l.data.i | r.data.i, 1; } },
+      { "noti"s, +[](cell_t* d, cell_t l, cell_t r){ return d->data.i = ~l.data.i, 1; } },
+      { "movis"s, +[](cell_t* d, cell_t l, cell_t r){ return d->data.i = l.data.i, 1; } },
+      { "movfs"s, +[](cell_t* d, cell_t l, cell_t r){ return d->data.i = l.data.i, 1; } },
+      { "jz"s, +[](cell_t* d, cell_t l, cell_t r){ return d->data.i = l.data.i ? d->data.i : r.data.i, 1; } },
+    };
+    return ops[req.op](req.dest, req.lhs, req.rhs);
+  }
+  std::list<spu_request_t> reqs;
+  async(
+    while(1) {
+      while(!reqs.empty()) {
+        yield(posedge(global_time));
+        yield(posedge(ellapse(exec(reqs.front()) * (1. / frequency))));
+        finish(reqs.front().fut);
+        reqs.pop_front();
+      }
+      hibernate;
+    }
+  )
+  future_t::ptr issue(std::string op, cell_t* dest, cell_t lhs, cell_t rhs) {
+    future_t::ptr fut = future_t::new_();
+    reqs.emplace_back(op, dest, lhs, rhs, fut); awake;
+    return fut;
+  }
+};
+
+spu_t& spu() {
+  static spu_t _spu;
+  return _spu;
+}
+
+struct ppu_t : public coroutine_t {
+  struct ppu_request_t {
+    std::string op;
+    std::vector<int64_t> size;
+    future_t::ptr fut;
+    ppu_request_t() = default;
+    ppu_request_t(std::string op, std::vector<int64_t> size, future_t::ptr fut) : op(op), size(size), fut(fut) { }
+  };
+  enum { NONE, UNARY, BINARY, REDUCE, POOL, CONV, MM };
+  int mode = NONE;
+  int64_t cycles = 0;
+  int64_t total_cycles = 0;
+  std::list<ppu_request_t> reqs;
+  std::list<future_t::ptr> hs;
+  cell_t cell;
+  async(
+    while(1) {
+      while(!reqs.empty() && mode != NONE) {
+        yield(posedge(global_time));
+        // pipeline 3: wb
+        if (mode == NONE) {
+        } else if (mode in std::set<int>{REDUCE}) {
+        } else if (mode in std::set<int>{UNARY, BINARY, POOL, CONV, MM}) {
+          if (cycles < total_cycles - 1)
+            hs.push_back(spm(0).set(0, &cell));
+        }
+        // pipeline 2: ex
+        hs.push_back(future_t::new_());
+        finish_at(hs.back(), ellapse(0.5/frequency));
+        // pipeline 1: ld
+        if (mode == NONE) {
+        } else if (mode in std::set<int>{UNARY, REDUCE}) {
+          if (cycles > 1)
+            hs.push_back(spm(0).get(0, &cell));
+        } else if (mode in std::set<int>{BINARY, POOL, CONV, MM}) {
+          if (cycles > 1) {
+            hs.push_back(spm(0).get(0, &cell));
+            hs.push_back(spm(0).get(1, &cell));
+          }
+        }
+        // pipeline 0: ctrl
+        if (mode == NONE) {
+          if (reqs.front().op in cc("movv"s, "movsv"s, "act"s, "floor"s, "mulvf"s, "divvf"s, "addvf"s, "subvf"s, "subfv"s,
+                               "ltvf"s, "gtvf"s, "levf"s, "gevf"s, "eqvf"s, "nevf"s)) {
+            mode = UNARY;
+            cycles = total_cycles = (reqs.front().size[0] + line_bytes - 1) / line_bytes + 2;
+          } else if (reqs.front().op in cc("mulv"s, "divv"s, "addv"s, "subv"s,
+                               "ltv"s, "gtv"s, "lev"s, "gev"s, "eqv"s, "nev"s)) {
+            mode = BINARY;
+            cycles = total_cycles = (reqs.front().size[0] + line_bytes - 1) / line_bytes + 2;
+          } else if (reqs.front().op in cc("haddv"s, "hmulv"s, "hminv"s, "hmaxv"s)) {
+            mode = REDUCE;
+            cycles = total_cycles = (reqs.front().size[0] + line_bytes - 1) / line_bytes + 2;
+          } else if (reqs.front().op in cc("pool"s)) {
+            mode = POOL;
+            int64_t fi = (reqs.front().size[0] * 2 + line_bytes - 1) / line_bytes;
+            int64_t kx = reqs.front().size[1];
+            int64_t ky = reqs.front().size[2];
+            int64_t sx = reqs.front().size[3];
+            int64_t sy = reqs.front().size[4];
+            int64_t xi = reqs.front().size[5];
+            int64_t yi = reqs.front().size[6];
+            int64_t bt = reqs.front().size[7];
+            int64_t px = reqs.front().size[8];
+            int64_t py = reqs.front().size[9];
+            int64_t xo = (xi - kx + px * 2 + sx) / sx;
+            int64_t yo = (yi - ky + py * 2 + sy) / sy;
+            cycles = total_cycles = bt * xo * yo * fi * kx * ky + 2;
+          } else if (reqs.front().op in cc("conv"s)) {
+            mode = CONV;
+            int64_t fi = (reqs.front().size[0] * 2 + line_bytes - 1) / line_bytes;
+            int64_t fo = (reqs.front().size[1] * 2 + line_bytes - 1) / line_bytes;
+            int64_t kx = reqs.front().size[2];
+            int64_t ky = reqs.front().size[3];
+            int64_t xi = reqs.front().size[4];
+            int64_t yi = reqs.front().size[5];
+            int64_t bt = reqs.front().size[6];
+            int64_t sx = reqs.front().size[7];
+            int64_t sy = reqs.front().size[8];
+            int64_t px = reqs.front().size[9];
+            int64_t py = reqs.front().size[10];
+            int64_t xo = (xi - kx + px * 2 + sx) / sx;
+            int64_t yo = (yi - ky + py * 2 + sy) / sy;
+            cycles = total_cycles = bt * xo * yo * fi * fo * kx * ky + 2;
+          } else if (reqs.front().op in cc("mm"s)) {
+            mode = MM;
+            int64_t fi = (reqs.front().size[0] * 2 + line_bytes - 1) / line_bytes;
+            int64_t fo = (reqs.front().size[1] * 2 + line_bytes - 1) / line_bytes;
+            int64_t ni = reqs.front().size[2];
+            int64_t bt = reqs.front().size[3];
+            cycles = total_cycles = bt * ni * fi * fo + 2;
+          } else if (reqs.front().op in cc("trans"s)) {
+            mode = UNARY;
+            int64_t n1 = (reqs.front().size[0] * 2 + line_bytes - 1) / line_bytes;
+            int64_t n2 = (reqs.front().size[1] * 2 + line_bytes - 1) / line_bytes;
+            cycles = total_cycles = n1 * n2 + 2;
+          }
+        } else {
+          if (!(cycles-->0)) {
+            mode = NONE;
+            finish(reqs.front().fut);
+            reqs.pop_front();
+            cycles = total_cycles = 0;
+          }
+        }
+        while(!hs.empty()) {
+          await(hs.front());
+          hs.pop_front();
+        }
+      }
+      hibernate;
+    }
+  )
+  future_t::ptr issue(std::string op, std::vector<param_t::ptr> args) {
+    future_t::ptr fut = future_t::new_();
+    std::vector<int64_t> size;
+    if (op in cc("pool"s, "conv"s, "mm"s, "trans"s)) {
+      for (auto&& p : args) if (p is typeid(imm_t)) size.push_back(p->eval());
+    } else if (op in cc("movsv"s)) {
+      size.push_back(line_bytes);
+    } else {
+      size.push_back(args.back()->eval());
+    }
+    reqs.emplace_back(op, size, fut); awake;
+    return fut;
+  }
+};
+
+ppu_t& ppu() {
+  static ppu_t _ppu;
+  return _ppu;
+}
+
+struct pdma_t : public coroutine_t {
+  struct pdma_request_t {
+    int64_t addr;
+    int64_t size;
+    bool load;
+    future_t::ptr fut;
+    pdma_request_t(int64_t addr, int64_t size, bool load, future_t::ptr fut) : addr(addr), size(size), load(load), fut(fut) { }
+  };
+  std::list<pdma_request_t> reqs;
+  std::list<future_t::ptr> hs;
+  async(while(1) {
+    while(!reqs.empty()) {
+      yield(posedge(global_time));
+      if (reqs.front().load) {
+        hs.push_back(spm(1).set(0, reqs.front().size));
+        hs.push_back(ddr().get(reqs.front().addr, reqs.front().size));
+      } else {
+        hs.push_back(spm(1).get(0, reqs.front().size));
+        hs.push_back(ddr().set(reqs.front().addr, reqs.front().size));
+      }
+      while (!hs.empty()) {
+        await(hs.front());
+        hs.pop_front();
+      }
+      finish(reqs.front().fut);
+      reqs.pop_front();
+    }
+    hibernate;
+  })
+  future_t::ptr issue(std::string op, std::vector<param_t::ptr> args) {
+    future_t::ptr fut = future_t::new_();
+    if (op == "loadv"s) {
+      reqs.emplace_back(args[1]->eval(), args[2]->eval(), true, fut);
+    } else if (op == "storev"s) {
+      reqs.emplace_back(args[0]->eval(), args[2]->eval(), false, fut);
+    } else if (op == "strideio"s) {
+      bool load = args[0]->eval() < spm_size;
+      for (int i = 0; i < args[4]->eval(); i++) {
+        reqs.emplace_back(args[load ? 0 : 1]->eval() + i * args[3]->eval(), args[2]->eval(), load,
+                          i == args[4]->eval() - 1 ? fut : nullptr);
+      }
+    }
+    awake;
+    return fut;
+  }
+};
+
+pdma_t& pdma() {
+  static pdma_t _pdma;
+  return _pdma;
+}
+
+struct inst_t {
+  std::string op;
+  std::vector<param_t::ptr> args;
+};
+
+std::list<inst_t> vq;
+
+struct pctrl_t : public coroutine_t {
+  
+};
+
+
 struct controller_t : public coroutine_t {
-  int i;
-  int j;
   bool halted;
+  int64_t pc;
+  int64_t pce;
   std::vector<future_t::ptr> hs;
-  async(for(i = 0; i < 10; i++) {
-    log(i);
-    hs.push_back(ddr().get(10000 + i * 16, 1024));
-    hs.push_back(ddr().set(10000 + i * 16 + 8, 1024));
-    hs.push_back(cache().get(i * 16, new cell_t));
-    hs.push_back(cache().set(i * 16 + 8, new cell_t));
-    for (j = 0; j < 4; j++) await(hs[j]);
-    hs.clear();
-  } halted = true;)
+  async(while(!halted){
+    
+  })
 };
 
 int main() {
