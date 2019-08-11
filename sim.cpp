@@ -477,6 +477,7 @@ struct reg_t : public param_t {
   int64_t regid;
   virtual int64_t eval() const { return regid; }
   reg_t(int64_t regid) : regid(regid) { }
+  reg_t() : regid(0) { }
 };
 
 struct imm_t : public param_t {
@@ -851,6 +852,7 @@ struct inst_t {
   std::string op;
   std::vector<param_t::ptr> args;
   inst_t(int pc_, std::string op_, std::vector<param_t::ptr> args_) : pc(pc_), op(op_), args(args_) {}
+  inst_t() = default;
 };
 
 struct vq_t : public coroutine_t {
