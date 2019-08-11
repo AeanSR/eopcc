@@ -98,7 +98,7 @@ constexpr double spm_read_energy = 0.0561984 * 1e-9; // nJ
 constexpr double spm_write_energy = 0.0555022 * 1e-9; // nJ
 
 constexpr int64_t spm_size = 1024 * 1024;
-constexpr int64_t vq_depth = 16;
+constexpr int64_t vq_depth = 8;
 // ================================================================ CPULESS CHARACTERISTICS =====
 
 using timestamp_t = double;
@@ -548,11 +548,14 @@ struct rob_t : public coroutine_t {
     rob_request_t(int64_t lock_seq, future_t::ptr fut) : lock_seq(lock_seq), fut(fut) { }
   };
   std::list<rob_request_t> reqs;
+  future_t::ptr fin = future_t::new_();
   async(while(1){
     while(!reqs.empty()) {
       await(reqs.front().fut);
       unlock(reqs.front().lock_seq);
       reqs.pop_front();
+      finish(fin);
+      fin = future_t::new_();
     }
     hibernate;
   })
@@ -664,7 +667,7 @@ struct ppu_t : public coroutine_t {
     ppu_request_t() = default;
     ppu_request_t(std::string op, std::vector<int64_t> size, future_t::ptr fut) : op(op), size(size), fut(fut) { }
   };
-  enum { NONE, UNARY, BINARY, REDUCE, POOL, CONV, MM };
+  enum { NONE, UNARY, BINARY, REDUCE, POOL, CONV, MM, MOVSV };
   int mode = NONE;
   int64_t cycles = 0;
   int64_t total_cycles = 0;
@@ -678,7 +681,7 @@ struct ppu_t : public coroutine_t {
         // pipeline 3: wb
         if (mode == NONE) {
         } else if (mode in std::set<int>{REDUCE}) {
-        } else if (mode in std::set<int>{UNARY, BINARY, POOL, CONV, MM}) {
+        } else if (mode in std::set<int>{UNARY, BINARY, POOL, CONV, MM, MOVSV}) {
           if (cycles < total_cycles - 1)
             hs.push_back(spm(0).set(0, &cell));
         }
@@ -698,7 +701,11 @@ struct ppu_t : public coroutine_t {
         }
         // pipeline 0: ctrl
         if (mode == NONE) {
-          if (reqs.front().op in cc("movv"s, "movsv"s, "act"s, "floor"s, "mulvf"s, "divvf"s, "addvf"s, "subvf"s, "subfv"s,
+          if (reqs.front().op in cc("movsv"s)) {
+            mode = MOVSV;
+            cycles = 1;
+            total_cycles = 3;
+          } else if (reqs.front().op in cc("movv"s, "act"s, "floor"s, "mulvf"s, "divvf"s, "addvf"s, "subvf"s, "subfv"s,
                                "ltvf"s, "gtvf"s, "levf"s, "gevf"s, "eqvf"s, "nevf"s)) {
             mode = UNARY;
             cycles = total_cycles = (reqs.front().size[0] + line_bytes - 1) / line_bytes + 2;
@@ -846,10 +853,82 @@ struct inst_t {
   std::vector<param_t::ptr> args;
 };
 
-std::list<inst_t> vq;
+struct vq_t : public coroutine_t {
+  std::list<inst_t> q;
 
-struct pctrl_t : public coroutine_t {
-  
+#define vqiio(comp, rw, ...) do { \
+          while (!rob().test_#rw(__VA_ARGS__)) \
+            await(rob().fin); \
+          h = comp.issue(i.op, i.args); \
+          rob().lock_#rw(h, __VA_ARGS__);\
+        } while(0)
+
+#define vqiu(startw, endw, startr, endr) do { \
+          while (!rob().test_write(startw, endw) || !rob().test_read(startr, endr)) \
+            await(rob().fin); \
+          h = ppu().issue(i.op, std::vector<int64_t>{size}); \
+          rob().lock_write(h, startw, endw); rob().lock_read(h, startr, endr);\
+        } while(0)
+
+#define vqib(startw, endw, startl, endl, startr, endr) do { \
+          while (!rob().test_write(startw, endw) || !rob().test_read(startl, endl) || !rob().test_read(startr, endr)) \
+            await(rob().fin); \
+          h = ppu().issue(i.op, std::vector<int64_t>{size}); \
+          rob().lock_write(h, startw, endw); rob().lock_read(h, startl, endl); rob().lock_read(h, startr, endr);\
+        } while(0)
+
+#define vqih(reg, startr, endr) do { \
+          while (!rob().test_read(startr, endr)) \
+            await(rob().fin); \
+          h = ppu().issue(i.op, std::vector<int64_t>{size}); \
+          rob().lock_write(h, reg); rob().lock_read(h, startr, endr);\
+        } while(0)
+
+  bool load;
+  int64_t spmad, size, size2;
+  inst_t i;
+  future_t::ptr h;
+  std::vector<int64_t> sizes;
+  async(while(1){                 
+    while(!q.empty()) {           
+      i = q.front();              
+      if (i.op == "strideio"s) {
+        load = i.args[0]->eval() < spm_size;
+        spmad = i.args[load ? 1 : 0]->eval();
+        size = i.args[2]->eval() * i.args[4]->eval();
+        if (load) vqiio(pdma(), write, spmad, spmad + size);
+        else vqiio(pdma(), read, spmad, spmad + size);
+      } else if (i.op == "loadv"s) {
+        spmad = i.args[0]->eval();
+        size = i.args[2]->eval();
+        vqiio(pdma(), write, spmad, spmad + size);
+      } else if (i.op == "storev"s) {
+        spmad = i.args[1]->eval();
+        size = i.args[2]->eval();
+        vqiio(pdma(), read, spmad, spmad + size);
+      } else if (i.op in cc("movv"s, "act"s, "floor"s, "mulvf"s, "divvf"s, "addvf"s, "subvf"s, "subfv"s, "ltvf"s,
+                            "gtvf"s, "levf"s, "gevf"s, "eqvf"s, "nevf"s)) {
+        size = i.args.back()->eval();
+        vqiu(i.args[0]->eval(), i.args[0]->eval() + size, i.args[1]->eval(), i.args[1]->eval() + size);
+      } else if (i.op in cc("mulv"s, "divv"s, "addv"s, "subv"s, "ltv"s, "lev"s, "gev"s, "eqv"s, "nev"s)) {
+        size = i.args.back()->eval();
+        vqib(i.args[0]->eval(), i.args[0]->eval() + size,
+             i.args[1]->eval(), i.args[1]->eval() + size,
+             i.args[2]->eval(), i.args[2]->eval() + size)
+      } else if (i.op in cc("haddv"s, "hmulv"s, "hminv"s, "hmaxv"s)) {
+        size = i.args.back()->eval();
+        vqih(reg_t(i.args[0]->eval()), i.args[1]->eval(), i.args[1]->eval() + size);
+      } else if (i.op in cc("pool"s)) {
+        sizes.clear();
+        for (int a = 0; a < 10; a++)
+          sizes.push_back(i.args[2 + a]->eval());
+        size = i.args[2]->eval() * i.args[7]->eval() * i.args[8]->eval() * i.args[9]->eval();
+      }
+      q.pop_front();
+      yield(ellapse(1. / frequency));
+    }
+    hibernate;
+  })
 };
 
 
