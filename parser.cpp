@@ -3715,7 +3715,7 @@ genval_t eval(symbol_val_t::ptr val) {
     pinst("movis", reg_t::alloc(val), std::get<int64_t>(cv));
     return reg_t::alloc(val);
   case 2:
-    pinst("movis", reg_t::alloc(val), std::get<double>(cv));
+    pinst("movfs", reg_t::alloc(val), std::get<double>(cv));
     return reg_t::alloc(val);
   case 3:
     return std::get<std::string>(cv);
@@ -3964,15 +3964,15 @@ genval_t eval(symbol_val_t::ptr val) {
       // F - V
       if (val->lhs->type is typeid(symbol_float_type_t) && val->rhs->type is typeid(symbol_vec_type_t)) {
         const std::string iname[] = { "mulvf", "?", "?", "addvf", "subfv", "?", "?",
-            "ltvf", "gtvf", "levf", "gevf", "eqvf", "nevf", "?", "?", "?", "?", "?" };
+            "gtvf", "ltvf", "gevf", "levf", "eqvf", "nevf", "?", "?", "?", "?", "?" };
         auto rv = std::get<addr_t::ptr>(rhs)->rv(val->rhs->rvvalue());
         rv->strike = val->rhs->type->sizeof_();
-        pinst(iname[val->opcode], rv, std::get<reg_t>(lhs), std::get<addr_t::ptr>(rhs), rv->strike);
+        pinst(iname[val->opcode], rv, std::get<addr_t::ptr>(rhs), std::get<reg_t>(lhs), rv->strike);
         return rv;
       }
       // V - F
       if (val->lhs->type is typeid(symbol_vec_type_t) && val->rhs->type is typeid(symbol_float_type_t)) {
-        const std::string iname[] = { "mulvf", "?", "?", "addvf", "subvf", "?", "?",
+        const std::string iname[] = { "mulvf", "divvf", "?", "addvf", "subvf", "?", "?",
             "ltvf", "gtvf", "levf", "gevf", "eqvf", "nevf", "?", "?", "?", "?", "?" };
         auto rv = std::get<addr_t::ptr>(lhs)->rv(val->lhs->rvvalue());
         rv->strike = val->lhs->type->sizeof_();
