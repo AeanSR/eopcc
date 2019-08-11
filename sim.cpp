@@ -516,30 +516,6 @@ struct rob_t : public coroutine_t {
   std::multimap<int64_t, lock_t> spm_begins;
   std::multimap<int64_t, lock_t> spm_ends;
   int64_t rob_seq = 1;
-  bool test_read(reg_t r) const {
-    return std::all_of(gr_lock.lower_bound(r.regid), gr_lock.upper_bound(r.regid), [](auto&& p){return p.second.read;});
-  }
-  bool test_write(reg_t r) const {
-    return std::none_of(gr_lock.lower_bound(r.regid), gr_lock.upper_bound(r.regid), [](auto&& p){return true;});
-  }
-  int64_t test_read(int64_t start, int64_t end) const {
-    std::multimap<int64_t, lock_t> deps;
-    std::set_intersection(
-        spm_begins.begin(), spm_begins.upper_bound(end),
-        spm_ends.lower_bound(start), spm_ends.end(),
-        std::inserter(deps, deps.end()), [](auto&& p1, auto&& p2){ return p1.second < p2.second; }
-    );
-    return std::all_of(deps.begin(), deps.end(), [](auto&& p){return p.second.read;});
-  }
-  int64_t test_write(int64_t start, int64_t end) const {
-    std::multimap<int64_t, lock_t> deps;
-    std::set_intersection(
-        spm_begins.begin(), spm_begins.upper_bound(end),
-        spm_ends.lower_bound(start), spm_ends.end(),
-        std::inserter(deps, deps.end()), [](auto&& p1, auto&& p2){ return p1.second < p2.second; }
-    );
-    return deps.empty();
-  }
   void unlock(int64_t lock_seq) {
     if (lock_seq > 0) {
       for (auto i = gr_lock.begin(); i != gr_lock.end(); i++) {
@@ -572,6 +548,30 @@ struct rob_t : public coroutine_t {
     }
     hibernate;
   })
+  bool test_read(reg_t r) const {
+    return std::all_of(gr_lock.lower_bound(r.regid), gr_lock.upper_bound(r.regid), [](auto&& p){return p.second.read;});
+  }
+  bool test_write(reg_t r) const {
+    return std::none_of(gr_lock.lower_bound(r.regid), gr_lock.upper_bound(r.regid), [](auto&& p){return true;});
+  }
+  int64_t test_read(int64_t start, int64_t end) const {
+    std::multimap<int64_t, lock_t> deps;
+    std::set_intersection(
+        spm_begins.begin(), spm_begins.upper_bound(end),
+        spm_ends.lower_bound(start), spm_ends.end(),
+        std::inserter(deps, deps.end()), [](auto&& p1, auto&& p2){ return p1.second < p2.second; }
+    );
+    return std::all_of(deps.begin(), deps.end(), [](auto&& p){return p.second.read;});
+  }
+  int64_t test_write(int64_t start, int64_t end) const {
+    std::multimap<int64_t, lock_t> deps;
+    std::set_intersection(
+        spm_begins.begin(), spm_begins.upper_bound(end),
+        spm_ends.lower_bound(start), spm_ends.end(),
+        std::inserter(deps, deps.end()), [](auto&& p1, auto&& p2){ return p1.second < p2.second; }
+    );
+    return deps.empty();
+  }
   void lock_read(future_t::ptr fut, reg_t r) {
     gr_lock.emplace(r.regid, lock_t(rob_seq, true));
     reqs.emplace_back(rob_seq, fut);
@@ -695,7 +695,6 @@ struct ppu_t : public coroutine_t {
         if (mode == NONE) {
         } else if (mode in std::set<int>{REDUCE}) {
         } else if (mode in std::set<int>{UNARY, BINARY, POOL, CONV, MM, MOVSV}) {
-          if (cycles < total_cycles - 1)
             hs.push_back(spm(0).set(0, &cell));
         }
         // pipeline 2: ex
@@ -704,10 +703,8 @@ struct ppu_t : public coroutine_t {
         // pipeline 1: ld
         if (mode == NONE) {
         } else if (mode in std::set<int>{UNARY, REDUCE}) {
-          if (cycles > 1)
             hs.push_back(spm(0).get(0, &cell));
         } else if (mode in std::set<int>{BINARY, POOL, CONV, MM}) {
-          if (cycles > 1) {
             hs.push_back(spm(0).get(0, &cell));
             hs.push_back(spm(0).get(1, &cell));
           }
@@ -717,61 +714,64 @@ struct ppu_t : public coroutine_t {
           if (reqs.front().op in cc("movsv"s)) {
             mode = MOVSV;
             cycles = 1;
-            total_cycles = 3;
+            total_cycles = 1;
           } else if (reqs.front().op in cc("movv"s, "act"s, "floor"s, "mulvf"s, "divvf"s, "addvf"s, "subvf"s, "subfv"s,
                                "ltvf"s, "gtvf"s, "levf"s, "gevf"s, "eqvf"s, "nevf"s)) {
             mode = UNARY;
-            cycles = total_cycles = (reqs.front().size[0] + line_bytes - 1) / line_bytes + 2;
+            cycles = total_cycles = (reqs.front().size.back() + line_bytes - 1) / line_bytes;
           } else if (reqs.front().op in cc("mulv"s, "divv"s, "addv"s, "subv"s,
                                "ltv"s, "gtv"s, "lev"s, "gev"s, "eqv"s, "nev"s)) {
             mode = BINARY;
-            cycles = total_cycles = (reqs.front().size[0] + line_bytes - 1) / line_bytes + 2;
+            cycles = total_cycles = (reqs.front().size.back() + line_bytes - 1) / line_bytes;
+          } else if (reqs.front().op in cc("cycleadd"s)) {
+            mode = BINARY;
+            cycles = total_cycles = (reqs.front().size[3] + line_bytes - 1) / line_bytes;
           } else if (reqs.front().op in cc("haddv"s, "hmulv"s, "hminv"s, "hmaxv"s)) {
             mode = REDUCE;
-            cycles = total_cycles = (reqs.front().size[0] + line_bytes - 1) / line_bytes + 2;
+            cycles = total_cycles = (reqs.front().size.back() + line_bytes - 1) / line_bytes;
           } else if (reqs.front().op in cc("pool"s)) {
             mode = POOL;
-            int64_t fi = (reqs.front().size[0] * 2 + line_bytes - 1) / line_bytes;
-            int64_t kx = reqs.front().size[1];
-            int64_t ky = reqs.front().size[2];
-            int64_t sx = reqs.front().size[3];
-            int64_t sy = reqs.front().size[4];
-            int64_t xi = reqs.front().size[5];
-            int64_t yi = reqs.front().size[6];
-            int64_t bt = reqs.front().size[7];
-            int64_t px = reqs.front().size[8];
-            int64_t py = reqs.front().size[9];
+            int64_t fi = (reqs.front().size[2] * 2 + line_bytes - 1) / line_bytes;
+            int64_t kx = reqs.front().size[3];
+            int64_t ky = reqs.front().size[4];
+            int64_t sx = reqs.front().size[5];
+            int64_t sy = reqs.front().size[6];
+            int64_t xi = reqs.front().size[7];
+            int64_t yi = reqs.front().size[8];
+            int64_t bt = reqs.front().size[9];
+            int64_t px = reqs.front().size[10];
+            int64_t py = reqs.front().size[11];
             int64_t xo = (xi - kx + px * 2 + sx) / sx;
             int64_t yo = (yi - ky + py * 2 + sy) / sy;
-            cycles = total_cycles = bt * xo * yo * fi * kx * ky + 2;
+            cycles = total_cycles = bt * xo * yo * fi * kx * ky;
           } else if (reqs.front().op in cc("conv"s)) {
             mode = CONV;
-            int64_t fi = (reqs.front().size[0] * 2 + line_bytes - 1) / line_bytes;
-            int64_t fo = (reqs.front().size[1] * 2 + line_bytes - 1) / line_bytes;
-            int64_t kx = reqs.front().size[2];
-            int64_t ky = reqs.front().size[3];
-            int64_t xi = reqs.front().size[4];
-            int64_t yi = reqs.front().size[5];
-            int64_t bt = reqs.front().size[6];
-            int64_t sx = reqs.front().size[7];
-            int64_t sy = reqs.front().size[8];
-            int64_t px = reqs.front().size[9];
-            int64_t py = reqs.front().size[10];
+            int64_t fi = (reqs.front().size[3] * 2 + line_bytes - 1) / line_bytes;
+            int64_t fo = (reqs.front().size[4] * 2 + line_bytes - 1) / line_bytes;
+            int64_t kx = reqs.front().size[5];
+            int64_t ky = reqs.front().size[6];
+            int64_t xi = reqs.front().size[7];
+            int64_t yi = reqs.front().size[8];
+            int64_t bt = reqs.front().size[9];
+            int64_t sx = reqs.front().size[10];
+            int64_t sy = reqs.front().size[11];
+            int64_t px = reqs.front().size[12];
+            int64_t py = reqs.front().size[13];
             int64_t xo = (xi - kx + px * 2 + sx) / sx;
             int64_t yo = (yi - ky + py * 2 + sy) / sy;
-            cycles = total_cycles = bt * xo * yo * fi * fo * kx * ky + 2;
+            cycles = total_cycles = bt * xo * yo * fi * fo * kx * ky;
           } else if (reqs.front().op in cc("mm"s)) {
             mode = MM;
-            int64_t fi = (reqs.front().size[0] * 2 + line_bytes - 1) / line_bytes;
-            int64_t fo = (reqs.front().size[1] * 2 + line_bytes - 1) / line_bytes;
-            int64_t ni = reqs.front().size[2];
-            int64_t bt = reqs.front().size[3];
-            cycles = total_cycles = bt * ni * fi * fo + 2;
+            int64_t fi = (reqs.front().size[3] * 2 + line_bytes - 1) / line_bytes;
+            int64_t fo = (reqs.front().size[4] * 2 + line_bytes - 1) / line_bytes;
+            int64_t ni = reqs.front().size[5];
+            int64_t bt = reqs.front().size[6];
+            cycles = total_cycles = bt * ni * fi * fo;
           } else if (reqs.front().op in cc("trans"s)) {
             mode = UNARY;
-            int64_t n1 = (reqs.front().size[0] * 2 + line_bytes - 1) / line_bytes;
-            int64_t n2 = (reqs.front().size[1] * 2 + line_bytes - 1) / line_bytes;
-            cycles = total_cycles = n1 * n2 + 2;
+            int64_t n1 = (reqs.front().size[2] * 2 + line_bytes - 1) / line_bytes;
+            int64_t n2 = (reqs.front().size[3] * 2 + line_bytes - 1) / line_bytes;
+            cycles = total_cycles = n1 * n2;
           }
         } else {
           if (!(cycles-->0)) {
@@ -787,11 +787,14 @@ struct ppu_t : public coroutine_t {
         }
       }
       hibernate;
+      yield(ellapse(2.0 / frequency));
     }
   )
-  future_t::ptr issue(std::string op, std::vector<int64_t> args) {
+  future_t::ptr issue(std::string op, std::vector<param_t::ptr> args) {
     future_t::ptr fut = future_t::new_();
-    reqs.emplace_back(op, args, fut); awake;
+    std::vector<int64_t> size;
+    for (auto&& p : args) size.push_back(p->eval());
+    reqs.emplace_back(op, size, fut); awake;
     return fut;
   }
 };
@@ -862,150 +865,19 @@ struct inst_t {
 };
 
 struct vq_t : public coroutine_t {
-  std::list<inst_t> q;
-  future_t::ptr fin = future_t::new_();
-
-#define vqii(...) do { \
-          while (!rob().test_write(__VA_ARGS__)) \
-            await(rob().fin); \
-          h = pdma().issue(i.op, i.args); \
-          rob().lock_write(h, __VA_ARGS__);\
-        } while(0)
-
-#define vqio(...) do { \
-          while (!rob().test_read(__VA_ARGS__)) \
-            await(rob().fin); \
-          h = pdma().issue(i.op, i.args); \
-          rob().lock_read(h, __VA_ARGS__);\
-        } while(0)
-
-#define vqiu(startw, endw, startr, endr) do { \
-          while (!rob().test_write(startw, endw) || !rob().test_read(startr, endr)) \
-            await(rob().fin); \
-          h = ppu().issue(i.op, std::vector<int64_t>{size}); \
-          rob().lock_write(h, startw, endw); rob().lock_read(h, startr, endr);\
-        } while(0)
-
-#define vqib(startw, endw, startl, endl, startr, endr) do { \
-          while (!rob().test_write(startw, endw) || !rob().test_read(startl, endl) || !rob().test_read(startr, endr)) \
-            await(rob().fin); \
-          h = ppu().issue(i.op, std::vector<int64_t>{size}); \
-          rob().lock_write(h, startw, endw); rob().lock_read(h, startl, endl); rob().lock_read(h, startr, endr);\
-        } while(0)
-
-#define vqih(reg, startr, endr) do { \
-          while (!rob().test_read(startr, endr)) \
-            await(rob().fin); \
-          h = ppu().issue(i.op, std::vector<int64_t>{size}); \
-          rob().lock_write(h, reg); rob().lock_read(h, startr, endr);\
-        } while(0)
-
-  bool load;
-  int64_t spmad, size, size2, size3, xo, yo;
+  std::list<std::pair<inst_t, future_t::ptr>> q;
   inst_t i;
   future_t::ptr h;
   std::vector<int64_t> sizes;
   async(while(1){                 
-    while(!q.empty()) {           
-      i = q.front();              
-      if (i.op == "strideio"s) {
-        load = i.args[0]->eval() < spm_size;
-        spmad = i.args[load ? 1 : 0]->eval();
-        size = i.args[2]->eval() * i.args[4]->eval();
-        if (load) vqii(spmad, spmad + size);
-        else vqio(spmad, spmad + size);
-      } else if (i.op == "loadv"s) {
-        spmad = i.args[0]->eval();
-        size = i.args[2]->eval();
-        vqii(spmad, spmad + size);
-      } else if (i.op == "storev"s) {
-        spmad = i.args[1]->eval();
-        size = i.args[2]->eval();
-        vqio(spmad, spmad + size);
-      } else if (i.op in cc("movv"s, "act"s, "floor"s, "mulvf"s, "divvf"s, "addvf"s, "subvf"s, "subfv"s, "ltvf"s,
-                            "gtvf"s, "levf"s, "gevf"s, "eqvf"s, "nevf"s)) {
-        size = i.args.back()->eval();
-        vqiu(i.args[0]->eval(), i.args[0]->eval() + size, i.args[1]->eval(), i.args[1]->eval() + size);
-      } else if (i.op in cc("mulv"s, "divv"s, "addv"s, "subv"s, "ltv"s, "lev"s, "gev"s, "eqv"s, "nev"s)) {
-        size = i.args.back()->eval();
-        vqib(i.args[0]->eval(), i.args[0]->eval() + size,
-             i.args[1]->eval(), i.args[1]->eval() + size,
-             i.args[2]->eval(), i.args[2]->eval() + size);
-      } else if (i.op in cc("haddv"s, "hmulv"s, "hminv"s, "hmaxv"s)) {
-        size = i.args.back()->eval();
-        vqih(reg_t(i.args[0]->eval()), i.args[1]->eval(), i.args[1]->eval() + size);
-      } else if (i.op in cc("pool"s)) {
-        sizes.clear();
-        for (int a = 0; a < 10; a++)
-          sizes.push_back(i.args[2 + a]->eval());
-        size = i.args[2]->eval() * i.args[7]->eval() * i.args[8]->eval() * i.args[9]->eval();
-        xo = (i.args[7]->eval() - i.args[3]->eval() + i.args[10]->eval() * 2 + i.args[5]->eval()) / i.args[5]->eval();
-        yo = (i.args[8]->eval() - i.args[4]->eval() + i.args[11]->eval() * 2 + i.args[6]->eval()) / i.args[6]->eval();
-        size2 = i.args[2]->eval() * xo * yo * i.args[9]->eval();
-        while (!rob().test_write(i.args[0]->eval(), i.args[0]->eval() + size2 * 2)
-            || !rob().test_read(i.args[1]->eval(), i.args[1]->eval() + size * 2))
-          await(rob().fin);
-        h = ppu().issue(i.op, sizes);
-        rob().lock_write(h, i.args[0]->eval(), i.args[0]->eval() + size2 * 2);
-        rob().lock_read(h, i.args[1]->eval(), i.args[1]->eval() + size * 2);
-      } else if (i.op in cc("conv"s)) {
-        sizes.clear();
-        for (int a = 0; a < 11; a++)
-          sizes.push_back(i.args[3 + a]->eval());
-        size = i.args[3]->eval() * i.args[7]->eval() * i.args[8]->eval() * i.args[9]->eval();
-        xo = (i.args[7]->eval() - i.args[5]->eval() + i.args[12]->eval() * 2 + i.args[10]->eval()) / i.args[10]->eval();
-        yo = (i.args[8]->eval() - i.args[6]->eval() + i.args[13]->eval() * 2 + i.args[11]->eval()) / i.args[11]->eval();
-        size2 = i.args[4]->eval() * xo * yo * i.args[9]->eval();
-        size3 = i.args[4]->eval() * i.args[5]->eval() * i.args[6]->eval() * i.args[3]->eval();
-        while (!rob().test_write(i.args[0]->eval(), i.args[0]->eval() + size2 * 2)
-            || !rob().test_read(i.args[1]->eval(), i.args[1]->eval() + size3 * 2)
-            || !rob().test_read(i.args[2]->eval(), i.args[2]->eval() + size * 2))
-          await(rob().fin);
-        h = ppu().issue(i.op, sizes);
-        rob().lock_write(h, i.args[0]->eval(), i.args[0]->eval() + size2 * 2);
-        rob().lock_read(h, i.args[1]->eval(), i.args[1]->eval() + size3 * 2);
-        rob().lock_read(h, i.args[2]->eval(), i.args[2]->eval() + size * 2);
-      } else if (i.op in cc("mm"s)) {
-        sizes.clear();
-        for (int a = 0; a < 4; a++)
-          sizes.push_back(i.args[3 + a]->eval());
-        size = i.args[3]->eval() * i.args[5]->eval() * i.args[6]->eval();
-        size2 = i.args[4]->eval() * i.args[5]->eval() * i.args[6]->eval();
-        size3 = i.args[3]->eval() * i.args[4]->eval() * i.args[6]->eval();
-        while (!rob().test_write(i.args[0]->eval(), i.args[0]->eval() + size2 * 2)
-            || !rob().test_read(i.args[1]->eval(), i.args[1]->eval() + size3 * 2)
-            || !rob().test_read(i.args[2]->eval(), i.args[2]->eval() + size * 2))
-          await(rob().fin);
-        h = ppu().issue(i.op, sizes);
-        rob().lock_write(h, i.args[0]->eval(), i.args[0]->eval() + size2 * 2);
-        rob().lock_read(h, i.args[1]->eval(), i.args[1]->eval() + size3 * 2);
-        rob().lock_read(h, i.args[2]->eval(), i.args[2]->eval() + size * 2);
-      } else if (i.op in cc("trans"s)) {
-        sizes.clear();
-        for (int a = 0; a < 2; a++)
-          sizes.push_back(i.args[2 + a]->eval());
-        size = i.args[2]->eval() * i.args[3]->eval();
-        while (!rob().test_write(i.args[0]->eval(), i.args[0]->eval() + size * 2)
-            || !rob().test_read(i.args[1]->eval(), i.args[1]->eval() + size * 2))
-          await(rob().fin);
-        h = ppu().issue(i.op, sizes);
-        rob().lock_write(h, i.args[0]->eval(), i.args[0]->eval() + size * 2);
-        rob().lock_read(h, i.args[1]->eval(), i.args[1]->eval() + size * 2);
-      } else if (i.op in cc("cycleadd"s)) {
-        size = i.args[3]->eval();
-        vqib(i.args[0]->eval(), i.args[0]->eval() + size,
-             i.args[1]->eval(), i.args[1]->eval() + size,
-             i.args[2]->eval(), i.args[2]->eval() + i.args[4]->eval());
-      } else if (i.op in cc("movsv"s)) {
-        size = line_bytes;
-        while (!rob().test_write(i.args[0]->eval(), i.args[0]->eval() + size))
-          await(rob().fin);
-        h = ppu().issue(i.op, std::vector<int64_t>{ size });
-        rob().lock_write(h, i.args[0]->eval(), i.args[0]->eval() + size);
-      }
+    while(!q.empty()) {
+      i = q.front().first;
+      if (i.op in cc("strideio"s, "loadv"s, "storev"s))
+        pdma().issue(i.op, i.args);
+      else
+        ppu().issue(i.op, i.args);
+      finish(q.front().second);
       q.pop_front();
-      finish(fin);
-      fin = future_t::new_();
       yield(ellapse(1. / frequency));
     }
     hibernate;
@@ -1017,6 +889,9 @@ struct vq_t : public coroutine_t {
   bool full() const {
     return q.size() >= vq_depth;
   }
+  bool empty() const {
+    return q.empty();
+  }
 };
 
 vq_t& vq() {
@@ -1024,13 +899,156 @@ vq_t& vq() {
   return _vq;
 }
 
-struct controller_t : public coroutine_t {
-  bool halted;
-  int64_t pc;
-  int64_t pce;
-  std::vector<future_t::ptr> hs;
-  async(while(!halted){
+struct rob_test_t {
+  int64_t start;
+  int64_t end;
+  reg_t reg;
+  bool is_addr;
+  bool is_reg;
+  bool read;
+  rob_test_t(bool read, int64_t start, int64_t end) : start(start), end(end), reg(0), is_addr(0 <= start && start < spm_size && 0 < end && end <=spm_size), is_reg(false), read(read) { }
+  rob_test_t(bool read, reg_t reg) : start(0), end(0), reg(reg), is_addr(false), is_reg(reg.eval() > 0), read(read) { }
+  rob_test_t() : is_addr(false), is_reg(false) { }
+  bool test() const {
+    if (is_addr) {
+      if (read) return rob().test_read(start, end);
+      else return rob().test_write(start, end);
+    }
+    if (is_reg) {
+      if (read) return rob().test_read(reg);
+      else return rob().test_write(reg);
+    }
+    return true;
+  }
+  void lock(future_t::ptr fut) {
+    if (is_addr) {
+      if (read) rob().lock_read(fut, start, end);
+      else rob().lock_write(fut, start, end);
+    }
+    if (is_reg) {
+      if (read) rob().lock_read(fut, reg);
+      else rob().lock_write(fut, reg);
+    }
+  }
+}
 
+struct controller_t : public coroutine_t {
+  bool halted = false;
+  int64_t pcm = 0;
+  int64_t pce = -1;
+  std::vector<inst_t> mq;
+  std::vector<inst_t> exq;
+  std::list<int64_t> ex_entry;
+
+  inst_t i;
+  int64_t spmad, size, size2, size3, xo, yo;
+  std::vector<rob_test_t> tests;
+  std::vector<future_t::ptr> hs;
+
+#define try_issue_to(comp) do { if (!std::all_of(tests.begin(), tests.end(), [](auto&& p){ return p.test(); })) throw 0; if (vq.full()) throw 0; h = comp.issue(i); for (auto&& t : tests) t.lock(h); } while(0)
+
+  async(while(!halted){
+    yield(posedge(global_time));
+    try { if (pcm >= mq.size()) halted = true; else {
+      i = mq[pcm++];
+      tests.clear();
+      for (auto p = std::next(i.args.begin()); p != i.args.end(); p++) {
+        if (*p is typeid(reg_t)) {
+          if (!rob().test_read(*p)) throw 0;
+          *p = std::make_shared<imm_t>();
+          (*p)->imm = 
+        }
+      }
+      if (i.op == "strideio"s) {
+        load = i.args[0]->eval() < spm_size;
+        spmad = i.args[load ? 1 : 0]->eval();
+        size = i.args[2]->eval() * i.args[4]->eval();
+        tests.emplace_back(!load, spmad, spmad + size);
+        try_issue_to(vq);
+      } else if (i.op == "loadv"s) {
+        spmad = i.args[0]->eval();
+        size = i.args[2]->eval();
+        tests.emplace_back(false, spmad, spmad + size);
+        try_issue_to(vq);
+      } else if (i.op == "storev"s) {
+        spmad = i.args[1]->eval();
+        size = i.args[2]->eval();
+        tests.emplace_back(true, spmad, spmad + size);
+        try_issue_to(vq);
+      } else if (i.op in cc("movv"s, "act"s, "floor"s, "mulvf"s, "divvf"s, "addvf"s, "subvf"s, "subfv"s, "ltvf"s,
+                            "gtvf"s, "levf"s, "gevf"s, "eqvf"s, "nevf"s)) {
+        size = i.args.back()->eval();
+        tests.emplace_back(false, i.args[0]->eval(), i.args[0]->eval() + size);
+        tests.emplace_back(true, i.args[1]->eval(), i.args[1]->eval() + size);
+        try_issue_to(vq);
+      } else if (i.op in cc("mulv"s, "divv"s, "addv"s, "subv"s, "ltv"s, "lev"s, "gev"s, "eqv"s, "nev"s)) {
+        size = i.args.back()->eval();
+        tests.emplace_back(false, i.args[0]->eval(), i.args[0]->eval() + size);
+        tests.emplace_back(true, i.args[1]->eval(), i.args[1]->eval() + size);
+        tests.emplace_back(true, i.args[2]->eval(), i.args[2]->eval() + size);
+        try_issue_to(vq);
+      } else if (i.op in cc("haddv"s, "hmulv"s, "hminv"s, "hmaxv"s)) {
+        size = i.args.back()->eval();
+        tests.emplace_back(false, reg_t(i.args[0]->eval()));
+        tests.emplace_back(true, i.args[1]->eval(), i.args[1]->eval() + size);
+        try_issue_to(vq);
+      } else if (i.op in cc("pool"s)) {
+        sizes.clear();
+        for (int a = 0; a < 10; a++)
+          sizes.push_back(i.args[2 + a]->eval());
+        size = i.args[2]->eval() * i.args[7]->eval() * i.args[8]->eval() * i.args[9]->eval();
+        xo = (i.args[7]->eval() - i.args[3]->eval() + i.args[10]->eval() * 2 + i.args[5]->eval()) / i.args[5]->eval();
+        yo = (i.args[8]->eval() - i.args[4]->eval() + i.args[11]->eval() * 2 + i.args[6]->eval()) / i.args[6]->eval();
+        size2 = i.args[2]->eval() * xo * yo * i.args[9]->eval();
+        tests.emplace_back(false, i.args[0]->eval(), i.args[0]->eval() + size2 * 2);
+        tests.emplace_back(true, i.args[1]->eval(), i.args[1]->eval() + size * 2);
+        try_issue_to(vq);
+      } else if (i.op in cc("conv"s)) {
+        sizes.clear();
+        for (int a = 0; a < 11; a++)
+          sizes.push_back(i.args[3 + a]->eval());
+        size = i.args[3]->eval() * i.args[7]->eval() * i.args[8]->eval() * i.args[9]->eval();
+        xo = (i.args[7]->eval() - i.args[5]->eval() + i.args[12]->eval() * 2 + i.args[10]->eval()) / i.args[10]->eval();
+        yo = (i.args[8]->eval() - i.args[6]->eval() + i.args[13]->eval() * 2 + i.args[11]->eval()) / i.args[11]->eval();
+        size2 = i.args[4]->eval() * xo * yo * i.args[9]->eval();
+        size3 = i.args[4]->eval() * i.args[5]->eval() * i.args[6]->eval() * i.args[3]->eval();
+        tests.emplace_back(false, i.args[0]->eval(), i.args[0]->eval() + size2 * 2);
+        tests.emplace_back(true, i.args[1]->eval(), i.args[1]->eval() + size3 * 2);
+        tests.emplace_back(true, i.args[2]->eval(), i.args[2]->eval() + size * 2);
+        try_issue_to(vq);
+      } else if (i.op in cc("mm"s)) {
+        sizes.clear();
+        for (int a = 0; a < 4; a++)
+          sizes.push_back(i.args[3 + a]->eval());
+        size = i.args[3]->eval() * i.args[5]->eval() * i.args[6]->eval();
+        size2 = i.args[4]->eval() * i.args[5]->eval() * i.args[6]->eval();
+        size3 = i.args[3]->eval() * i.args[4]->eval() * i.args[6]->eval();
+        tests.emplace_back(false, i.args[0]->eval(), i.args[0]->eval() + size2 * 2);
+        tests.emplace_back(true, i.args[1]->eval(), i.args[1]->eval() + size3 * 2);
+        tests.emplace_back(true, i.args[2]->eval(), i.args[2]->eval() + size * 2);
+        try_issue_to(vq);
+      } else if (i.op in cc("trans"s)) {
+        sizes.clear();
+        for (int a = 0; a < 2; a++)
+          sizes.push_back(i.args[2 + a]->eval());
+        size = i.args[2]->eval() * i.args[3]->eval();
+        tests.emplace_back(false, i.args[0]->eval(), i.args[0]->eval() + size * 2);
+        tests.emplace_back(true, i.args[1]->eval(), i.args[1]->eval() + size * 2);
+        try_issue_to(vq);
+      } else if (i.op in cc("cycleadd"s)) {
+        size = i.args[3]->eval();
+        tests.emplace_back(false, i.args[0]->eval(), i.args[0]->eval() + size);
+        tests.emplace_back(true, i.args[1]->eval(), i.args[1]->eval() + size);
+        tests.emplace_back(true, i.args[2]->eval(), i.args[2]->eval() + i.args[4]->eval());
+        try_issue_to(vq);
+      } else if (i.op in cc("movsv"s)) {
+        size = line_bytes;
+        tests.emplace_back(false, i.args[0]->eval(), i.args[0]->eval() + size);
+        try_issue_to(vq);
+      }
+    } } catch(...) {
+
+    }
   })
 };
 
