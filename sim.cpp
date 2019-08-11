@@ -13,6 +13,8 @@
 #include <typeindex>
 #include <cmath>
 
+#include "data_loader.h"
+
 using namespace std::string_literals;
 
 #define in +in_recieve_set_t()*
