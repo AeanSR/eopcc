@@ -237,24 +237,18 @@ struct io_t : public coroutine_t {
   timestamp_t set_finish;
   async(while(1) {
     while (get_finish || set_finish || !gets.empty() || !sets.empty()) {
-      log("mem loop.");
       if (!get_finish && !gets.empty() && (duplex() || !set_finish) && (sets.empty() || gets.front().ts <= sets.front().ts)) {
-        log("mem start get.");
         get_finish = ellapse(get_exec(gets.front()));
       } else if (!set_finish && !sets.empty() && (duplex() || !get_finish) && (gets.empty() || sets.front().ts <= gets.front().ts)) {
-        log("mem start set.");
         set_finish = ellapse(set_exec(sets.front()));
       } else if (get_finish && (!set_finish || get_finish <= set_finish)) {
-        log("mem exec get.");
         while (get_finish > global_time)
           yield(get_finish);
         get_finish = 0;
         if (gets.front().data) *gets.front().data = mem()->ref(gets.front().addr);
-        log("mem get finish.");
         finish(gets.front().fut);
         gets.pop_front();
       } else if (set_finish && (!get_finish || get_finish > set_finish)) {
-        log("mem exec set.");
         while (set_finish > global_time)
           yield(set_finish);
         set_finish = 0;
@@ -262,12 +256,10 @@ struct io_t : public coroutine_t {
           mem()->ref(sets.front().addr) = *sets.front().data;
         else
           mem()->ref(sets.front().addr).det = false;
-        log("mem set finish.");
         finish(sets.front().fut);
         sets.pop_front();
       }
     }
-    log("mem hibernate.");
     hibernate;
     if (!gets.empty())
       yield(ellapse(read_latency()));
@@ -416,39 +408,29 @@ struct cache_t : public coroutine_t {
       req = reqs.front();
       reqs.pop_front();
 
-      log("cache lookup.");
       hit = lookup(req.addr);
       yield(ellapse(hit ? cache_hit_latency : cache_miss_latency));
-      log("cache lookup finish.");
 
       if (req.mode == 0) { // read
         if (!hit) { // miss, must read from ddr.
-          log("cache proxy ddr read.");
           await(ddr().get(req.addr, &data_array.ref(req.addr)));
-          log("cache proxy ddr read finish.");
         }
         *req.data = data_array.ref(req.addr);
         finish(req.fut); // return result while writing cache.
         if (!hit) {
-          log("cache record new tag.");
           record(req.addr);
           yield(ellapse(cache_write_latency));
-          log("cache record new tag finish.");
         }
       } else { // write
-        log("cache write non-blocking.");
         finish(req.fut); // execution dont need to wait cache writing.
         if (!hit || *req.data != data_array.ref(req.addr)) {
-          log("cache proxy ddr write. cache write.");
           ddr().set(req.addr, req.data); // no await, write cache and ddr simutaneously.
           yield(ellapse(cache_write_latency));
           data_array.ref(req.addr) = *req.data;
           record(req.addr);
-          log("cache write finish.");
         }
       }
     }
-    log("cache hibernate.");
     hibernate;
   })
   future_t::ptr get(int64_t addr, cell_t* data) {
@@ -493,6 +475,8 @@ struct iimm_t : public imm_t {
   virtual int64_t eval() const { return imm; }
   friend std::ostream &operator<<(std::ostream &out, const iimm_t &t);
   virtual int visualizing() const { std::cout << *this; return 0; }
+  iimm_t(int64_t i) : imm(i) { }
+  iimm_t() = default;
 };
 
 // float imm_t
@@ -700,13 +684,13 @@ struct spu_t : public coroutine_t {
       { "movfs"s, +[](cell_t* d, cell_t l, cell_t r){ return d->data.i = l.data.i, 1; } },
       { "jz"s, +[](cell_t* d, cell_t l, cell_t r){ return d->data.i = l.data.i ? d->data.i : r.data.i, 1; } },
     };
+    req.dest->det = req.lhs.det && req.rhs.det;
     return ops[req.op](req.dest, req.lhs, req.rhs);
   }
   std::list<spu_request_t> reqs;
   async(
     while(1) {
       while(!reqs.empty()) {
-        yield(posedge(global_time));
         yield(posedge(ellapse(exec(reqs.front()) * (1. / frequency))));
         finish(reqs.front().fut);
         reqs.pop_front();
@@ -761,7 +745,6 @@ struct ppu_t : public coroutine_t {
         } else if (mode in std::set<int>{BINARY, POOL, CONV, MM}) {
             hs.push_back(spm(0).get(0, &cell));
             hs.push_back(spm(0).get(1, &cell));
-          }
         }
         // pipeline 0: ctrl
         if (mode == NONE) {
@@ -842,9 +825,9 @@ struct ppu_t : public coroutine_t {
       }
       hibernate;
       yield(ellapse(2.0 / frequency));
-    }
-  )
-  future_t::ptr issue(std::string op, std::vector<param_t::ptr> args) {
+    })
+
+  typename future_t::ptr issue(std::string op, std::vector<param_t::ptr> args) {
     future_t::ptr fut = future_t::new_();
     std::vector<int64_t> size;
     for (auto&& p : args) size.push_back(p->eval());
@@ -936,9 +919,10 @@ struct vq_t : public coroutine_t {
     }
     hibernate;
   })
-  void issue(inst_t i) {
-    q.push_back(i);
+  future_t::ptr issue(inst_t i) {
+    q.emplace_back(i, future_t::new_());
     awake;
+    return q.back().second;
   }
   bool full() const {
     return q.size() >= vq_depth;
@@ -984,11 +968,11 @@ struct rob_test_t {
       else rob().lock_write(fut, reg);
     }
   }
-}
+};
 
 struct controller_t : public coroutine_t {
-  bool halted = false;
-  int64_t pcm = 0;
+  bool halted = false, in_except = false, stuck = false;
+  int64_t pc = 0;
   int64_t pce = -1;
   std::vector<inst_t> mq;
   std::vector<inst_t> exq;
@@ -997,27 +981,46 @@ struct controller_t : public coroutine_t {
   inst_t i;
   int64_t spmad, size, size2, size3, xo, yo;
   std::vector<rob_test_t> tests;
-  std::vector<future_t::ptr> hs;
+  cell_t dcell, lcell, rcell;
+  int tno;
+  future_t::ptr h;
 
-#define try_issue_to(comp) do { if (!std::all_of(tests.begin(), tests.end(), [](auto&& p){ return p.test(); })) throw 0; if (vq.full()) throw 0; h = comp.issue(i); for (auto&& t : tests) t.lock(h); } while(0)
+#define try_issue_to(comp) do { if (!std::all_of(tests.begin(), tests.end(), [](auto&& p){ return p.test(); })) lbthrow(0); if (vq().full()) lbthrow(0); h = comp().issue(i); for (auto&& t : tests) t.lock(h); yield(ellapse(1. / frequency)); } while(0)
+#define lbthrow(t) do { tno = (t); goto lbcatch; } while(0)
 
   async(while(!halted){
     yield(posedge(global_time));
-    try { if (pcm >= mq.size()) halted = true; else {
-      i = mq[pcm++];
+    log(__LINE__);
+    lbtry: { if (pc >= mq.size()) halted = true; else {
+      i = mq[pc++];
       tests.clear();
-      for (auto p = std::next(i.args.begin()); p != i.args.end(); p++) {
-        if (*p is typeid(reg_t)) {
-          if (!rob().test_read(*p)) throw 0;
-          *p = std::make_shared<imm_t>();
-          (*p)->imm = 
+      gr().ref(0) = dcell = lcell = rcell = cell_t();
+      for (auto p = i.args.begin(); p != i.args.end(); p++) {
+        if (*p is typeid(reg_t) && p != i.args.begin()) {
+          auto regid = (*p)->eval();
+          if (regid == 0) {
+            *p = std::make_shared<iimm_t>(0);
+          } else {
+            if (!rob().test_read(reg_t(regid))) lbthrow(0);
+          }
+        } else if (*p is typeid(raddr_t)) {
+          int64_t regid = (*p)->eval();
+          if (regid == 0) {
+            *p = std::make_shared<iimm_t>(gr().ref(regid).data.i);
+          } else {
+            if (!rob().test_read(reg_t(regid))) lbthrow(0);
+            if (!gr().ref(regid).det) {
+              std::cerr << "pc=" << pc << ", undetermined data referenced as address!" << std::endl;
+            }
+            *p = std::make_shared<iimm_t>(gr().ref(regid).data.i);
+          }
         }
       }
+    log(__LINE__);
       if (i.op == "strideio"s) {
-        load = i.args[0]->eval() < spm_size;
-        spmad = i.args[load ? 1 : 0]->eval();
+        spmad = i.args[i.args[0]->eval() < spm_size ? 1 : 0]->eval();
         size = i.args[2]->eval() * i.args[4]->eval();
-        tests.emplace_back(!load, spmad, spmad + size);
+        tests.emplace_back(i.args[0]->eval() >= spm_size, spmad, spmad + size);
         try_issue_to(vq);
       } else if (i.op == "loadv"s) {
         spmad = i.args[0]->eval();
@@ -1047,9 +1050,6 @@ struct controller_t : public coroutine_t {
         tests.emplace_back(true, i.args[1]->eval(), i.args[1]->eval() + size);
         try_issue_to(vq);
       } else if (i.op in cc("pool"s)) {
-        sizes.clear();
-        for (int a = 0; a < 10; a++)
-          sizes.push_back(i.args[2 + a]->eval());
         size = i.args[2]->eval() * i.args[7]->eval() * i.args[8]->eval() * i.args[9]->eval();
         xo = (i.args[7]->eval() - i.args[3]->eval() + i.args[10]->eval() * 2 + i.args[5]->eval()) / i.args[5]->eval();
         yo = (i.args[8]->eval() - i.args[4]->eval() + i.args[11]->eval() * 2 + i.args[6]->eval()) / i.args[6]->eval();
@@ -1058,9 +1058,6 @@ struct controller_t : public coroutine_t {
         tests.emplace_back(true, i.args[1]->eval(), i.args[1]->eval() + size * 2);
         try_issue_to(vq);
       } else if (i.op in cc("conv"s)) {
-        sizes.clear();
-        for (int a = 0; a < 11; a++)
-          sizes.push_back(i.args[3 + a]->eval());
         size = i.args[3]->eval() * i.args[7]->eval() * i.args[8]->eval() * i.args[9]->eval();
         xo = (i.args[7]->eval() - i.args[5]->eval() + i.args[12]->eval() * 2 + i.args[10]->eval()) / i.args[10]->eval();
         yo = (i.args[8]->eval() - i.args[6]->eval() + i.args[13]->eval() * 2 + i.args[11]->eval()) / i.args[11]->eval();
@@ -1071,9 +1068,6 @@ struct controller_t : public coroutine_t {
         tests.emplace_back(true, i.args[2]->eval(), i.args[2]->eval() + size * 2);
         try_issue_to(vq);
       } else if (i.op in cc("mm"s)) {
-        sizes.clear();
-        for (int a = 0; a < 4; a++)
-          sizes.push_back(i.args[3 + a]->eval());
         size = i.args[3]->eval() * i.args[5]->eval() * i.args[6]->eval();
         size2 = i.args[4]->eval() * i.args[5]->eval() * i.args[6]->eval();
         size3 = i.args[3]->eval() * i.args[4]->eval() * i.args[6]->eval();
@@ -1082,9 +1076,6 @@ struct controller_t : public coroutine_t {
         tests.emplace_back(true, i.args[2]->eval(), i.args[2]->eval() + size * 2);
         try_issue_to(vq);
       } else if (i.op in cc("trans"s)) {
-        sizes.clear();
-        for (int a = 0; a < 2; a++)
-          sizes.push_back(i.args[2 + a]->eval());
         size = i.args[2]->eval() * i.args[3]->eval();
         tests.emplace_back(false, i.args[0]->eval(), i.args[0]->eval() + size * 2);
         tests.emplace_back(true, i.args[1]->eval(), i.args[1]->eval() + size * 2);
@@ -1099,10 +1090,101 @@ struct controller_t : public coroutine_t {
         size = line_bytes;
         tests.emplace_back(false, i.args[0]->eval(), i.args[0]->eval() + size);
         try_issue_to(vq);
+      } else {
+        log(__LINE__ << i.op);
+        if (i.op in cc("nop"s)) {
+        } else if (i.op in cc("halt"s)) {
+          halted = true;
+        } else if (i.op in cc("print"s)) {
+          log(__LINE__);
+          if (i.args[0] is typeid(output_t))
+            std::cout << std::dynamic_pointer_cast<output_t>(i.args[0])->content;
+          else if (i.args[0] is typeid(reg_t))
+            std::cout << gr().ref(i.args[0]->eval()).data.i;
+          else
+            std::cout << cache().data_array.ref(i.args[0]->eval()).data.i;
+        } else if (i.op in cc("printf"s)) {
+          if (i.args[0] is typeid(output_t))
+            std::cout << std::dynamic_pointer_cast<output_t>(i.args[0])->content;
+          else if (i.args[0] is typeid(reg_t))
+            std::cout << gr().ref(i.args[0]->eval()).data.f;
+          else
+            std::cout << cache().data_array.ref(i.args[0]->eval()).data.f;
+        } else if (i.op in cc("jz"s)) {
+          dcell.data.i = pc;
+          lcell = gr().ref(i.args[0]->eval());
+          if (!gr().ref(i.args[0]->eval()).det)
+            std::cerr << "pc=" << pc << ", undetermined data referenced as condition!" << std::endl;
+          rcell.data.i = i.args[1]->eval();
+          await(spu().issue(i.op, &dcell, lcell, rcell));
+          pc = dcell.data.i;
+        } else if (i.op in cc("yield"s)) {
+          yield(ellapse(1. / frequency));
+          gr().ref(i.args[0]->eval()).data.i++;
+          lbthrow(1);
+        } else if (i.op in cc("await"s)) {
+          yield(ellapse(1. / frequency));
+          if (gr().ref(i.args[0]->eval()).data.i) {
+            gr().ref(i.args[0]->eval()).data.i--;
+          } else lbthrow(0);
+        } else if (i.op in cc("raise"s)) {
+          yield(ellapse(1. / frequency));
+          ex_entry.push_back(i.args[0]->eval());
+        } else if (i.op in cc("movvs"s)) {
+          spmad = i.args[1]->eval();
+          tests.emplace_back(true, spmad, spmad + line_bytes);
+          if (!std::all_of(tests.begin(), tests.end(), [](auto&& p){ return p.test(); })) lbthrow(0);
+          await(spm(0).get(spmad, &dcell));
+          gr().ref(i.args[0]->eval()).det = false;
+        } else if (i.op in cc("movfs"s)) {
+          yield(ellapse(1. / frequency));
+          gr().ref(i.args[0]->eval()).data.f = std::dynamic_pointer_cast<fimm_t>(i.args[1])->imm;
+          gr().ref(i.args[0]->eval()).det = true;
+        } else if (i.op in cc("loads"s)) {
+          await(cache().get(i.args[1]->eval(), &gr().ref(i.args[0]->eval())));
+        } else if (i.op in cc("stores"s)) {
+          await(cache().set(i.args[0]->eval(), &gr().ref(i.args[1]->eval())));
+        } else if (i.op in cc("cvtif"s, "cvtfi"s, "noti"s, "movis"s)) {
+          if (i.args[1] is typeid(iimm_t)) lcell.data.i = i.args[1]->eval();
+          else lcell = gr().ref(i.args[1]->eval());
+          await(spu().issue(i.op, &dcell, lcell, rcell));
+          gr().ref(i.args[0]->eval()) = dcell;
+        } else {
+          if (i.args[1] is typeid(iimm_t)) lcell.data.i = i.args[1]->eval();
+          else lcell = gr().ref(i.args[1]->eval());
+          if (i.args[2] is typeid(iimm_t)) rcell.data.i = i.args[2]->eval();
+          else rcell = gr().ref(i.args[2]->eval());
+          await(spu().issue(i.op, &dcell, lcell, rcell));
+          gr().ref(i.args[0]->eval()) = dcell;
+        }
       }
-    } } catch(...) {
+      stuck = false;
+    } } continue; lbcatch: {
+      if (tno) {
+        pc = -1;
+        std::swap(pc, pce);
+        std::swap(mq, exq);
+        in_except = false;
+        continue;
+      } else {
+        if (stuck == true) {
 
+        } else if (in_except || pce >= 0 || !ex_entry.empty()) {
+          pc--;
+          std::swap(pc, pce);
+          std::swap(mq, exq);
+          in_except = !in_except;
+          stuck = true;
+          if (pc < 0) {
+            pc = ex_entry.front();
+            ex_entry.pop_front();
+          }
+          continue;
+        }
+      }
     }
+    await(rob().fin);
+    stuck = false;
   })
 };
 
@@ -1128,11 +1210,11 @@ int readraw(std::vector<inst_t> &main_inst, std::vector<inst_t> &except_inst, co
 
   while(fscanf(fpin, "%s", input_str) != EOF) {
     if (strcmp(input_str, "main:") == 0) {
-      std::cout << "main inst" << std::endl;
+      //std::cout << "main inst" << std::endl;
       continue;
     }
     if (strcmp(input_str, "except:") == 0) {
-      std::cout << "except inst" << std::endl;
+      //std::cout << "except inst" << std::endl;
       now = &except_inst;
       continue;
     }
@@ -1220,8 +1302,10 @@ int checkinput(const std::vector<inst_t> main_inst, const std::vector<inst_t> ex
   return 0;
 }
 
-int main() {
+int main(int argc, char** argv) {
   controller_t controller;
+  readraw(controller.mq, controller.exq, (argc > 1 ? argv[1] : "eop.out"));
+  controller.exq.insert(controller.exq.begin(), controller.mq.begin(), controller.mq.end());
   for (auto&& p : coroutine_t::list())
     p->operator()();
   while(!eq.empty()) {
@@ -1231,12 +1315,13 @@ int main() {
       e.callback->operator()();
     }
   }
-
+  std::cout << "[" << global_time << "] " << "processor halted." << std::endl;
+/*
   std::vector<inst_t> main_inst;
   std::vector<inst_t> except_inst;
   readraw(main_inst, except_inst, std::string("eop.out").c_str());
   printf("%d %d\n", main_inst.size(), except_inst.size());
   checkinput(main_inst, except_inst);
-
+*/
   return 0;
 }
