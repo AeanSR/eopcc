@@ -4327,111 +4327,365 @@ void exec(symbol_stmt_t::ptr stmt) {
         printf("parser.cpp: CONV parameters:\n bt = %d\n xi = %d, yi = %d\n fi = %d, fo = %d\n kx = %d, ky = %d, sx = %d, sy = %d\n px = %d, py = %d\n xo = %d, yo = %d\n", bt, xi, yi, fi, fo, kx, ky, sx, sy, px, py, xo, yo);
         // data_size: 2byte
         int64_t total_size;
-        int64_t sp_fo;
-        int64_t sp_num = 0;
+        int64_t sp_fo = fo;
+        int64_t fo_num = 0;
+        int64_t sp_fi = fi;
+        int64_t fi_num = 0;
     
-        if(2*(fi*kx*ky + 2*fi*xi*yi + 2*xo*yo) > 1048576) {
-          printf("parser.cpp CONV too large to handle!!!");
-          exit(0);
-        }
-        while(1) {
-          sp_num++;
-          sp_fo = fo%sp_num ? fo/sp_num+1 : fo/sp_num;
-          if(stmt->bias != NULL)
-            total_size = fi*sp_fo*kx*ky + sp_fo + 2*fi*xi*yi + 4*sp_fo*xo*yo;
-          else
-            total_size = fi*sp_fo*kx*ky + 2*fi*xi*yi + 2*sp_fo*xo*yo;
-          if(2*total_size <= 1048576)  break;
-        }
-        sp_num = fo%sp_fo ? fo/sp_fo+1 : fo/sp_fo;
-        printf("parser.cpp: CONV fo = %d, sp_num = %d, sp_fo = %d, 2*total_size = %d <= 1048576\n", fo, sp_num, sp_fo, 2*total_size);
-
-
-        addr_t::ptr syn_addr  = std::make_shared<addr_t>(stmt, 1, 2*(0                                        ), 2*fi*sp_fo*kx*ky);
-        addr_t::ptr neu0_addr = std::make_shared<addr_t>(stmt, 1, 2*(fi*sp_fo*kx*ky                           ), 2*fi*xi*yi);
-        addr_t::ptr neu1_addr = std::make_shared<addr_t>(stmt, 1, 2*(fi*sp_fo*kx*ky + fi*xi*yi                ), 2*fi*xi*yi);
-        addr_t::ptr res0_addr = std::make_shared<addr_t>(stmt, 1, 2*(fi*sp_fo*kx*ky + 2*fi*xi*yi              ), 2*sp_fo*xo*yo);
-        addr_t::ptr res1_addr = std::make_shared<addr_t>(stmt, 1, 2*(fi*sp_fo*kx*ky + 2*fi*xi*yi + sp_fo*xo*yo), 2*sp_fo*xo*yo);
-
-        addr_t::ptr bia_addr     ; 
-        addr_t::ptr bia_res0_addr; 
-        addr_t::ptr bia_res1_addr; 
         if(stmt->bias != NULL) {
-          bia_addr      = std::make_shared<addr_t>(stmt, 1, 2*(fi*sp_fo*kx*ky + 2*fi*xi*yi + 2*sp_fo*xo*yo        ), 2*sp_fo);
-          bia_res0_addr = std::make_shared<addr_t>(stmt, 1, 2*(fi*sp_fo*kx*ky + 2*fi*xi*yi + 2*sp_fo*xo*yo + sp_fo), 2*sp_fo*xo*yo);
-          bia_res1_addr = std::make_shared<addr_t>(stmt, 1, 2*(fi*sp_fo*kx*ky + 2*fi*xi*yi + 3*sp_fo*xo*yo + sp_fo), 2*sp_fo*xo*yo);
+          if(2*(fi*kx*ky + 1 + 2*fi*xi*yi + 4*xo*yo) < 1048576) {
+            sp_fi = fi;
+            fi_num = 1;
+            while(1) {
+              fo_num++;
+              sp_fo = fo%fo_num ? fo/fo_num+1 : fo/fo_num;
+              if(bt == 1)
+                total_size = 2*fi*sp_fo*kx*ky + 2*sp_fo + fi*xi*yi + 4*sp_fo*xo*yo;
+              else
+                total_size = fi*sp_fo*kx*ky + sp_fo + 2*fi*xi*yi + 4*sp_fo*xo*yo;
+              if(2*total_size <= 1048576)  break;
+            }
+            fo_num = fo%sp_fo ? fo/sp_fo+1 : fo/sp_fo;
+          }
+
+          else if(2*(2*kx*ky + 1 + 2*xi*yi + 5*xo*yo) < 1048576) {
+            sp_fo = 1;
+            fo_num = fo;
+            while(1) {
+              fi_num++;
+              sp_fi = fi%fi_num ? fi/fi_num+1 : fi/fi_num;
+              total_size = 2*sp_fi*kx*ky + 1 + 2*sp_fi*xi*yi + 5*xo*yo;
+              if(2*total_size <= 1048576)  break;
+            }
+            fi_num = fi%sp_fi ? fi/sp_fi+1 : fi/sp_fi;
+          }
+
+          else {
+            printf("parser.cpp CONV too large to handle!!!");
+            exit(0);
+          }
         }
 
-        int64_t comp_fo;
-        for(int sp_idx = 0; sp_idx < sp_num; sp_idx++) {
-          if((sp_idx == sp_num-1) && (fo%sp_fo != 0))
-            comp_fo = fo%sp_fo;
-          else
-            comp_fo = sp_fo;
+        else {
+          if(2*(fi*kx*ky + 2*fi*xi*yi + 2*xo*yo) <= 1048576) {
+            sp_fi = fi;
+            fi_num = 1;
+            while(1) {
+              fo_num++;
+              sp_fo = fo%fo_num ? fo/fo_num+1 : fo/fo_num;
+              if(bt == 1)
+                total_size = 2*fi*sp_fo*kx*ky + fi*xi*yi + 2*sp_fo*xo*yo;
+              else
+                total_size = fi*sp_fo*kx*ky + 2*fi*xi*yi + 2*sp_fo*xo*yo;
+              if(2*total_size <= 1048576)  break;
+            }
+            fo_num = fo%sp_fo ? fo/sp_fo+1 : fo/sp_fo;
+          }
 
-          // load weight
-          pinst("loadv", syn_addr, syn->offset(2*sp_idx*sp_fo*fi*kx*ky), 2*comp_fo*fi*kx*ky);  
+          else if(2*(2*kx*ky + 2*xi*yi + 4*xo*yo) <= 1048576) {
+            sp_fo = 1;
+            fo_num = fo;
+            while(1) {
+              fi_num++;
+              sp_fi = fi%fi_num ? fi/fi_num+1 : fi/fi_num;
+              total_size = 2*sp_fi*kx*ky + 2*sp_fi*xi*yi + 4*xo*yo;
+              if(2*total_size <= 1048576)  break;
+            }
+            fi_num = fi%sp_fi ? fi/sp_fi+1 : fi/sp_fi;
+          }
+
+          else {
+            printf("parser.cpp CONV too large to handle!!!");
+            exit(0);
+          }
+        }
+        printf("parser.cpp: CONV bt = %d, fo = %d, fo_num = %d, sp_fo = %d, fi = %d, fi_num = %d, sp_fi = %d, 2*total_size = %d <= 1048576\n", bt, fo, fo_num, sp_fo, fi, fi_num, sp_fi, 2*total_size);
+
+        if(fi_num == 1 && sp_fi == fi) {
+          if(bt == 1) {
+            addr_t::ptr neu_addr;
+            addr_t::ptr syn0_addr; 
+            addr_t::ptr syn1_addr; 
+            addr_t::ptr res0_addr;
+            addr_t::ptr res1_addr;
+            addr_t::ptr bia0_addr; 
+            addr_t::ptr bia1_addr; 
+            addr_t::ptr bia_res0_addr; 
+            addr_t::ptr bia_res1_addr; 
+
+            neu_addr  = std::make_shared<addr_t>(stmt, 1, 2*(0                                        ), 2*fi*xi*yi);
+            syn0_addr = std::make_shared<addr_t>(stmt, 1, 2*(fi*xi*yi                                 ), 2*fi*sp_fo*kx*ky);
+            syn1_addr = std::make_shared<addr_t>(stmt, 1, 2*(fi*xi*yi + fi*sp_fo*kx*ky                ), 2*fi*sp_fo*kx*ky);
+            res0_addr = std::make_shared<addr_t>(stmt, 1, 2*(fi*xi*yi + 2*fi*sp_fo*kx*ky              ), 2*sp_fo*xo*yo);
+            res1_addr = std::make_shared<addr_t>(stmt, 1, 2*(fi*xi*yi + 2*fi*sp_fo*kx*ky + sp_fo*xo*yo), 2*sp_fo*xo*yo);
+            if(stmt->bias != NULL) {
+              bia0_addr     = std::make_shared<addr_t>(stmt, 1, 2*(fi*xi*yi + 2*fi*sp_fo*kx*ky + 2*sp_fo*xo*yo          ), 2*sp_fo);
+              bia1_addr     = std::make_shared<addr_t>(stmt, 1, 2*(fi*xi*yi + 2*fi*sp_fo*kx*ky + 2*sp_fo*xo*yo + sp_fo  ), 2*sp_fo);
+              bia_res0_addr = std::make_shared<addr_t>(stmt, 1, 2*(fi*xi*yi + 2*fi*sp_fo*kx*ky + 2*sp_fo*xo*yo + 2*sp_fo), 2*sp_fo*xo*yo);
+              bia_res1_addr = std::make_shared<addr_t>(stmt, 1, 2*(fi*xi*yi + 2*fi*sp_fo*kx*ky + 3*sp_fo*xo*yo + 2*sp_fo), 2*sp_fo*xo*yo);
+            }
+
+            int fo_id_0;
+            int fo_id_1;
+            int64_t comp_fo_0;
+            int64_t comp_fo_1;
+
+            // load neu
+            pinst("loadv", neu_addr, neu, 2*fi*xi*yi);  
+
+            for(int iter = 0; iter < fo_num/2; iter++) {
+              fo_id_0 = 2*iter + 0;
+              if((fo_id_0 == fo_num-1) && (fo%sp_fo != 0))
+                comp_fo_0 = fo%sp_fo;
+              else
+                comp_fo_0 = sp_fo;
+
+              fo_id_1 = 2*iter + 1;
+              if((fo_id_1 == fo_num-1) && (fo%sp_fo != 0))
+                comp_fo_1 = fo%sp_fo;
+              else
+                comp_fo_1 = sp_fo;
+
+              // load weight0
+              pinst("loadv", syn0_addr, syn->offset(2*fo_id_0*sp_fo*fi*kx*ky), 2*comp_fo_0*fi*kx*ky);  
+              // load bias0
+              if(stmt->bias != NULL)
+                pinst("loadv", bia0_addr->offset(2*fo_id_0*sp_fo), bia, 2*comp_fo_0);  
+
+              // load weight1
+              pinst("loadv", syn1_addr, syn->offset(2*fo_id_1*sp_fo*fi*kx*ky), 2*comp_fo_1*fi*kx*ky);  
+              // load bias1
+              if(stmt->bias != NULL)
+                pinst("loadv", bia1_addr->offset(2*fo_id_1*sp_fo), bia, 2*comp_fo_1);  
+
+              // conv0
+              pinst("conv", res0_addr, syn0_addr, neu_addr, fi, comp_fo_0, kx, ky, xi, yi, (int64_t)1, sx, sy, px, py);
+              // conv0 mac_result add bias
+              if(stmt->bias != NULL)
+                pinst("cycleadd", bia_res0_addr, res0_addr, bia0_addr, 2*comp_fo_0*xo*yo, 2*comp_fo_0);
+
+              // conv1
+              pinst("conv", res1_addr, syn1_addr, neu_addr, fi, comp_fo_1, kx, ky, xi, yi, (int64_t)1, sx, sy, px, py);
+              // conv1 mac_result add bias
+              if(stmt->bias != NULL)
+                pinst("cycleadd", bia_res1_addr, res1_addr, bia1_addr, 2*comp_fo_1*xo*yo, 2*comp_fo_1);
+
+              // store res0
+              if(stmt->bias != NULL)
+                pinst("strideio", dst->offset(2*fo_id_0*sp_fo), bia_res0_addr, 2*comp_fo_0, 2*fo, xo*yo);  
+              else
+                pinst("strideio", dst->offset(2*fo_id_0*sp_fo), res0_addr, 2*comp_fo_0, 2*fo, xo*yo);  
+
+              // store res1
+              if(stmt->bias != NULL)
+                pinst("strideio", dst->offset(2*fo_id_1*sp_fo), bia_res1_addr, 2*comp_fo_1, 2*fo, xo*yo);  
+              else
+                pinst("strideio", dst->offset(2*fo_id_1*sp_fo), res1_addr, 2*comp_fo_1, 2*fo, xo*yo);  
+            }
+
+            if(fo_num%2) {
+              fo_id_0 = fo_num-1;
+              if(fo%sp_fo != 0)
+                comp_fo_0 = fo%sp_fo;
+              else
+                comp_fo_0 = sp_fo;
+
+              // load weight0
+              pinst("loadv", syn0_addr, syn->offset(2*fo_id_0*sp_fo*fi*kx*ky), 2*comp_fo_0*fi*kx*ky);  
+              // load bias0
+              if(stmt->bias != NULL)
+                pinst("loadv", bia0_addr->offset(2*fo_id_0*sp_fo), bia, 2*comp_fo_0);  
+
+              // conv0
+              pinst("conv", res0_addr, syn0_addr, neu_addr, fi, comp_fo_0, kx, ky, xi, yi, (int64_t)1, sx, sy, px, py);
+              // conv0 mac_result add bias
+              if(stmt->bias != NULL)
+                pinst("cycleadd", bia_res0_addr, res0_addr, bia0_addr, 2*comp_fo_0*xo*yo, 2*comp_fo_0);
+
+              // store res0
+              if(stmt->bias != NULL)
+                pinst("strideio", dst->offset(2*fo_id_0*sp_fo), bia_res0_addr, 2*comp_fo_0, 2*fo, xo*yo);  
+              else
+                pinst("strideio", dst->offset(2*fo_id_0*sp_fo), res0_addr, 2*comp_fo_0, 2*fo, xo*yo);  
+            }
+          }
+
+          if(bt > 1) {
+            addr_t::ptr syn_addr; 
+            addr_t::ptr neu0_addr;
+            addr_t::ptr neu1_addr;
+            addr_t::ptr res0_addr;
+            addr_t::ptr res1_addr;
+            addr_t::ptr bia_addr; 
+            addr_t::ptr bia_res0_addr; 
+            addr_t::ptr bia_res1_addr; 
+
+            syn_addr  = std::make_shared<addr_t>(stmt, 1, 2*(0                                        ), 2*fi*sp_fo*kx*ky);
+            neu0_addr = std::make_shared<addr_t>(stmt, 1, 2*(fi*sp_fo*kx*ky                           ), 2*fi*xi*yi);
+            neu1_addr = std::make_shared<addr_t>(stmt, 1, 2*(fi*sp_fo*kx*ky + fi*xi*yi                ), 2*fi*xi*yi);
+            res0_addr = std::make_shared<addr_t>(stmt, 1, 2*(fi*sp_fo*kx*ky + 2*fi*xi*yi              ), 2*sp_fo*xo*yo);
+            res1_addr = std::make_shared<addr_t>(stmt, 1, 2*(fi*sp_fo*kx*ky + 2*fi*xi*yi + sp_fo*xo*yo), 2*sp_fo*xo*yo);
+            if(stmt->bias != NULL) {
+              bia_addr      = std::make_shared<addr_t>(stmt, 1, 2*(fi*sp_fo*kx*ky + 2*fi*xi*yi + 2*sp_fo*xo*yo        ), 2*sp_fo);
+              bia_res0_addr = std::make_shared<addr_t>(stmt, 1, 2*(fi*sp_fo*kx*ky + 2*fi*xi*yi + 2*sp_fo*xo*yo + sp_fo), 2*sp_fo*xo*yo);
+              bia_res1_addr = std::make_shared<addr_t>(stmt, 1, 2*(fi*sp_fo*kx*ky + 2*fi*xi*yi + 3*sp_fo*xo*yo + sp_fo), 2*sp_fo*xo*yo);
+            }
+
+            int64_t comp_fo;
+            for(int fo_id = 0; fo_id < fo_num; fo_id++) {
+              if((fo_id == fo_num-1) && (fo%sp_fo != 0))
+                comp_fo = fo%sp_fo;
+              else
+                comp_fo = sp_fo;
+
+              // load weight
+              pinst("loadv", syn_addr, syn->offset(2*fo_id*sp_fo*fi*kx*ky), 2*comp_fo*fi*kx*ky);  
+              if(stmt->bias != NULL) {
+                // load bias
+                pinst("loadv", bia_addr->offset(2*fo_id*sp_fo), bia, 2*comp_fo);  
+              }
+
+              int iter = 0;
+              for(iter = 0; iter < bt/2; iter++) {
+                printf("parser.cpp: CONV compute, fo_id = %d, batch_iter = %d, comp_fo = %d\n", fo_id, iter, comp_fo);
+            
+                // load neu0
+                pinst("loadv", (neu0_addr), (neu)->offset((2*iter+0)*2*fi*xi*yi), 2*fi*xi*yi);  
+
+                // load neu1
+                pinst("loadv", (neu1_addr), (neu)->offset((2*iter+1)*2*fi*xi*yi), 2*fi*xi*yi);  
+
+                // conv0
+                pinst("conv", (res0_addr), (syn_addr), (neu0_addr), fi, comp_fo, kx, ky, xi, yi, (int64_t)1, sx, sy, px, py);
+                // conv0 mac_result add bias
+                if(stmt->bias != NULL)
+                  pinst("cycleadd", (bia_res0_addr), (res0_addr), (bia_addr), 2*comp_fo*xo*yo, 2*comp_fo);
+
+                // conv1
+                pinst("conv", (res1_addr), (syn_addr), (neu1_addr), fi, comp_fo, kx, ky, xi, yi, (int64_t)1, sx, sy, px, py);
+                // conv1 mac_result add bias
+                if(stmt->bias != NULL)
+                  pinst("cycleadd", (bia_res1_addr), (res1_addr), (bia_addr), 2*comp_fo*xo*yo, 2*comp_fo);
+
+                // store res0
+                if(stmt->bias != NULL)
+                  pinst("strideio", dst->offset(2*((2*iter+0)*fo*xo*yo + fo_id*sp_fo)), bia_res0_addr, 2*comp_fo, 2*fo, xo*yo);  
+                else
+                  pinst("strideio", dst->offset(2*((2*iter+0)*fo*xo*yo + fo_id*sp_fo)), res0_addr, 2*comp_fo, 2*fo, xo*yo);  
+
+                // store res1
+                if(stmt->bias != NULL)
+                  pinst("strideio", dst->offset(2*((2*iter+1)*fo*xo*yo + fo_id*sp_fo)), bia_res1_addr, 2*comp_fo, 2*fo, xo*yo);  
+                else
+                  pinst("strideio", dst->offset(2*((2*iter+1)*fo*xo*yo + fo_id*sp_fo)), res1_addr, 2*comp_fo, 2*fo, xo*yo);  
+              }
+
+              if(bt%2) {
+                printf("parser.cpp: CONV compute, fo_id = %d, batch_iter = %d, comp_fo = %d\n", fo_id, iter, comp_fo);
+                // load neu0
+                pinst("loadv", (neu0_addr), (neu)->offset((bt-1)*2*fi*xi*yi), 2*fi*xi*yi);  
+
+                // conv0
+                pinst("conv", (res0_addr), (syn_addr), (neu0_addr), fi, comp_fo, kx, ky, xi, yi, (int64_t)1, sx, sy, px, py);
+                // conv0 mac_result add bias
+                if(stmt->bias != NULL)
+                  pinst("cycleadd", (bia_res0_addr), (res0_addr), (bia_addr), 2*comp_fo*xo*yo, 2*comp_fo);
+
+                // store res0
+                if(stmt->bias != NULL)
+                  pinst("strideio", dst->offset(2*((bt-1)*fo*xo*yo + fo_id*sp_fo)), bia_res0_addr, 2*comp_fo, 2*fo, xo*yo);  
+                else
+                  pinst("strideio", dst->offset(2*((bt-1)*fo*xo*yo + fo_id*sp_fo)), res0_addr, 2*comp_fo, 2*fo, xo*yo);  
+              }
+            }
+          }
+        } // end if(fi_num == 1 && sp_fi == fi)
+
+        else if(sp_fo == 1 && fo_num == fo) {
+          addr_t::ptr neu0_addr;
+          addr_t::ptr neu1_addr;
+          addr_t::ptr syn0_addr; 
+          addr_t::ptr syn1_addr; 
+          addr_t::ptr res0_addr;
+          addr_t::ptr res1_addr;
+          addr_t::ptr acc0_addr;
+          addr_t::ptr acc1_addr;
+          addr_t::ptr bia_addr; 
+          addr_t::ptr bia_acc_addr; 
+
+          neu0_addr = std::make_shared<addr_t>(stmt, 1, 2*(0                                      ), 2*sp_fi*xi*yi);
+          neu1_addr = std::make_shared<addr_t>(stmt, 1, 2*(sp_fi*xi*yi                            ), 2*sp_fi*xi*yi);
+          syn0_addr = std::make_shared<addr_t>(stmt, 1, 2*(2*sp_fi*xi*yi                          ), 2*sp_fi*kx*ky);
+          syn1_addr = std::make_shared<addr_t>(stmt, 1, 2*(2*sp_fi*xi*yi + sp_fi*kx*ky            ), 2*sp_fi*kx*ky);
+          res0_addr = std::make_shared<addr_t>(stmt, 1, 2*(2*sp_fi*xi*yi + 2*sp_fi*kx*ky          ), 2*xo*yo);
+          res1_addr = std::make_shared<addr_t>(stmt, 1, 2*(2*sp_fi*xi*yi + 2*sp_fi*kx*ky + xo*yo  ), 2*xo*yo);
+          acc0_addr = std::make_shared<addr_t>(stmt, 1, 2*(2*sp_fi*xi*yi + 2*sp_fi*kx*ky + 2*xo*yo), 2*xo*yo);
+          acc1_addr = std::make_shared<addr_t>(stmt, 1, 2*(2*sp_fi*xi*yi + 2*sp_fi*kx*ky + 3*xo*yo), 2*xo*yo);
           if(stmt->bias != NULL) {
-            // load bias
-            pinst("loadv", bia_addr->offset(2*sp_idx*sp_fo), bia, 2*comp_fo);  
+            bia_addr     = std::make_shared<addr_t>(stmt, 1, 2*(2*sp_fi*xi*yi + 2*sp_fi*kx*ky + 4*xo*yo), 2);
+            bia_acc_addr = std::make_shared<addr_t>(stmt, 1, 2*(2*sp_fi*xi*yi + 2*sp_fi*kx*ky + 4*xo*yo + 1), 2*xo*yo);
           }
 
-          int iter = 0;
-          for(iter = 0; iter < bt/2; iter++) {
-            printf("parser.cpp: CONV compute, sp_idx = %d, batch_iter = %d, comp_fo = %d\n", sp_idx, iter, comp_fo);
-        
-            // load neu0
-            pinst("loadv", (neu0_addr), (neu)->offset((2*iter+0)*2*fi*xi*yi), 2*fi*xi*yi);  
+          int64_t comp_fi;
+          for(int bt_id = 0; bt_id < bt; bt_id++) {
+            for(int fo_id = 0; fo_id < fo; fo_id++) {
+              for(int fi_id = 0; fi_id < fi_num; fi_id++) {
+                if((fi_id == fi_num-1) && (fi%sp_fi != 0))
+                  comp_fi = fi%sp_fi;
+                else
+                  comp_fi = sp_fi;
 
-            // load neu1
-            pinst("loadv", (neu1_addr), (neu)->offset((2*iter+1)*2*fi*xi*yi), 2*fi*xi*yi);  
+                if(fi_id%2 == 0) {
+                  // load neu0
+                  pinst("strideio", neu0_addr, neu->offset(2*(bt_id*fi*xi*yi + fi_id*sp_fi)), 2*comp_fi, 2*fi, xi*yi);  
+                  // load weight0
+                  pinst("strideio", syn0_addr, syn->offset(2*(fo_id*fi*kx*ky + fi_id*sp_fi)), 2*comp_fi, 2*fi, kx*ky);  
+                  if(fi_id == 0) {
+                    // conv0, res0 -> acc0
+                    pinst("conv", acc0_addr, syn0_addr, neu0_addr, comp_fi, (int64_t)1, kx, ky, xi, yi, (int64_t)1, sx, sy, px, py);
+                  }
+                  else {
+                    // conv0
+                    pinst("conv", res0_addr, syn0_addr, neu0_addr, comp_fi, (int64_t)1, kx, ky, xi, yi, (int64_t)1, sx, sy, px, py);
+                    // res0 + acc1 -> acc0
+                    pinst("addv", acc0_addr, res0_addr, acc1_addr, xo*yo);
+                  }
+                }
 
-            // conv0
-            pinst("conv", (res0_addr), (syn_addr), (neu0_addr), fi, comp_fo, kx, ky, xi, yi, (int64_t)1, sx, sy, px, py);
-            // conv0 mac_result add bias
-            if(stmt->bias != NULL)
-              pinst("cycleadd", (bia_res0_addr), (res0_addr), (bia_addr), 2*comp_fo*xo*yo, 2*comp_fo);
+                if(fi_id%2 == 1) {
+                  // load neu1
+                  pinst("strideio", neu1_addr, neu->offset(2*(bt_id*fi*xi*yi + fi_id*sp_fi)), 2*comp_fi, 2*fi, xi*yi);  
+                  // load weight1
+                  pinst("strideio", syn1_addr, syn->offset(2*(fo_id*fi*kx*ky + fi_id*sp_fi)), 2*comp_fi, 2*fi, kx*ky);  
+                  // conv1
+                  pinst("conv", res1_addr, syn1_addr, neu1_addr, comp_fi, (int64_t)1, kx, ky, xi, yi, (int64_t)1, sx, sy, px, py);
+                  // res1 + acc0 -> acc1
+                  pinst("addv", acc1_addr, res1_addr, acc0_addr, xo*yo);
+                }
+              }
 
-            // conv1
-            pinst("conv", (res1_addr), (syn_addr), (neu1_addr), fi, comp_fo, kx, ky, xi, yi, (int64_t)1, sx, sy, px, py);
-            // conv1 mac_result add bias
-            if(stmt->bias != NULL)
-              pinst("cycleadd", (bia_res1_addr), (res1_addr), (bia_addr), 2*comp_fo*xo*yo, 2*comp_fo);
+              if(stmt->bias != NULL) {
+                // load bias
+                pinst("loadv", bia_addr->offset(2*fo_id), bia, (int64_t)2);  
+                // acc_result add bias
+                if(fi_num%2 == 0)
+                  pinst("cycleadd", bia_acc_addr, acc1_addr, bia_addr, 2*xo*yo, (int64_t)2);
+                else
+                  pinst("cycleadd", bia_acc_addr, acc0_addr, bia_addr, 2*xo*yo, (int64_t)2);
+                // store res
+                pinst("strideio", dst->offset(2*(bt_id*fo*xo*yo + fo_id)), bia_acc_addr, (int64_t)2, 2*fo, xo*yo);
+              }
+              else {
+                // store res
+                if(fi_num%2 == 0)
+                  pinst("strideio", dst->offset(2*(bt_id*fo*xo*yo + fo_id)), acc1_addr, (int64_t)2, 2*fo, xo*yo);
+                else
+                  pinst("strideio", dst->offset(2*(bt_id*fo*xo*yo + fo_id)), acc0_addr, (int64_t)2, 2*fo, xo*yo);
+              }
+            } // fo_id
+          } // bt_id
 
-            // stride_storev: dst_addr(on DDR, gapped address), src_addr(on SPM, continuous address), num, size, stride (size <= stride)
-            // stride_storev: [src_addr + size*idx +: size] -> [dst_addr + stride*idx +: size], idx = 0, 1, ..., num-1
-
-            // store res0
-            if(stmt->bias != NULL)
-              pinst("stride_storev", dst->offset(2*((2*iter+0)*fo*xo*yo + sp_idx*sp_fo)), bia_res0_addr, xo*yo, 2*comp_fo, 2*fo);  
-            else
-              pinst("stride_storev", dst->offset(2*((2*iter+0)*fo*xo*yo + sp_idx*sp_fo)), res0_addr, xo*yo, 2*comp_fo, 2*fo);  
-
-            // store res1
-            if(stmt->bias != NULL)
-              pinst("stride_storev", dst->offset(2*((2*iter+1)*fo*xo*yo + sp_idx*sp_fo)), bia_res1_addr, xo*yo, 2*comp_fo, 2*fo);  
-            else
-              pinst("stride_storev", dst->offset(2*((2*iter+1)*fo*xo*yo + sp_idx*sp_fo)), res1_addr, xo*yo, 2*comp_fo, 2*fo);  
-          }
-
-          if(bt%2) {
-            printf("parser.cpp: CONV compute, sp_idx = %d, batch_iter = %d, comp_fo = %d\n", sp_idx, iter, comp_fo);
-            // load neu0
-            pinst("loadv", (neu0_addr), (neu)->offset((bt-1)*2*fi*xi*yi), 2*fi*xi*yi);  
-
-            // conv0
-            pinst("conv", (res0_addr), (syn_addr), (neu0_addr), fi, comp_fo, kx, ky, xi, yi, (int64_t)1, sx, sy, px, py);
-            // conv0 mac_result add bias
-            if(stmt->bias != NULL)
-              pinst("cycleadd", (bia_res0_addr), (res0_addr), (bia_addr), 2*comp_fo*xo*yo, 2*comp_fo);
-
-            // store res0
-            if(stmt->bias != NULL)
-              pinst("stride_storev", dst->offset(2*((bt-1)*fo*xo*yo + sp_idx*sp_fo)), bia_res0_addr, xo*yo, 2*comp_fo, 2*fo);  
-            else
-              pinst("stride_storev", dst->offset(2*((bt-1)*fo*xo*yo + sp_idx*sp_fo)), res0_addr, xo*yo, 2*comp_fo, 2*fo);  
-          }
-        }
+        } // end if(sp_fo == 1 && fo_num == fo)
       } 
 
       else if(stmt->operator_type == symbol_builtin_conv_t::MLP) {
@@ -4451,12 +4705,13 @@ void exec(symbol_stmt_t::ptr stmt) {
         auto dst = std::get<addr_t::ptr>(eval(stmt->dest));
         auto syn = std::get<addr_t::ptr>(eval(stmt->weight));
         auto neu = std::get<addr_t::ptr>(eval(stmt->input));
-        auto bia = std::get<addr_t::ptr>(eval(stmt->bias));
+        addr_t::ptr bia;
+        if(stmt->bias != NULL)
+          bia = std::get<addr_t::ptr>(eval(stmt->bias));
         int64_t bt = stmt->bt;
         int64_t xi = stmt->xi;
         int64_t yi = stmt->yi;
         int64_t fi = stmt->fi;
-        int64_t fo = stmt->fo;
         int64_t kx = stmt->kx;
         int64_t ky = stmt->ky;
         int64_t sx = stmt->sx;
@@ -4465,143 +4720,135 @@ void exec(symbol_stmt_t::ptr stmt) {
         int64_t py = stmt->py;
         int64_t xo = (xi + 2*px - kx + sx) / sx;
         int64_t yo = (yi + 2*py - ky + sy) / sy;
-        int64_t tmp_size = (fi*xi*yi > fo*xo*yo) ? fi*xi*yi : fo*xo*yo;
-        if(fi != fo) {
-          printf("parser.cpp: fi!=fo, deepthwise parameter error!\n");
-          exit(0);
-        }
+        printf("parser.cpp: DEPTHWISE_CONV parameters:\n bt = %d\n xi = %d, yi = %d\n fi = %d\n kx = %d, ky = %d, sx = %d, sy = %d\n px = %d, py = %d\n xo = %d, yo = %d\n", bt, xi, yi, fi, kx, ky, sx, sy, px, py, xo, yo);
         // data_size: 2byte
         int64_t total_size;
-        if(stmt->bias != NULL)
-          total_size = fi*kx*ky + fo + 2*fi*xi*yi + 4*fo*xo*yo + tmp_size;
-        else
-          total_size = fi*kx*ky + 2*fi*xi*yi + 2*fo*xo*yo + tmp_size;
-        if(2*total_size > 1048576) {
-          printf("parser.cpp: DEPTHWISE_CONV too large to handle!\n");
-          exit(0);
+        int64_t sp_bt = bt;
+        int64_t bt_num = 0;
+        if(stmt->bias != NULL) {
+          if(2*(2*xi*yi + 2*kx*ky + 2 + 4*xo*yo) <= 1048576) {
+            while(1) {
+              bt_num++;
+              sp_bt = bt%bt_num ? bt/bt_num+1 : bt/bt_num;
+              total_size = 2*sp_bt*xi*yi + 2*kx*ky + 2 + 4*sp_bt*xo*yo;
+              if(2*total_size <= 1048576)  break;
+            }
+          }
+          else {
+            printf("parser.cpp DEEPTHWISE_CONV too large to handle!!!");
+            exit(0);
+          }
         }
+        else {
+          if(2*(2*xi*yi + 2*kx*ky + 2*xo*yo) <= 1048576) {
+            while(1) {
+              bt_num++;
+              sp_bt = bt%bt_num ? bt/bt_num+1 : bt/bt_num;
+              total_size = 2*sp_bt*xi*yi + 2*kx*ky + 2*sp_bt*xo*yo;
+              if(2*total_size <= 1048576)  break;
+            }
+          }
+          else {
+            printf("parser.cpp DEEPTHWISE_CONV too large to handle!!!");
+            exit(0);
+          }
+        }
+        printf("parser.cpp: DEPTHWISE_CONV bt = %d, bt_num = %d, sp_bt = %d, 2*total_size = %d <= 1048576\n", bt, bt_num, sp_bt, 2*total_size);
 
-        addr_t::ptr syn_addr  = std::make_shared<addr_t>(stmt, 1, 2*(0                               ), 2*fi*kx*ky);
-        addr_t::ptr neu0_addr = std::make_shared<addr_t>(stmt, 1, 2*(fi*kx*ky                        ), 2*fi*xi*yi);
-        addr_t::ptr neu1_addr = std::make_shared<addr_t>(stmt, 1, 2*(fi*kx*ky + fi*xi*yi             ), 2*fi*xi*yi);
-        addr_t::ptr res0_addr = std::make_shared<addr_t>(stmt, 1, 2*(fi*kx*ky + 2*fi*xi*yi           ), 2*fo*xo*yo);
-        addr_t::ptr res1_addr = std::make_shared<addr_t>(stmt, 1, 2*(fi*kx*ky + 2*fi*xi*yi + fo*xo*yo), 2*fo*xo*yo);
+        addr_t::ptr syn0_addr = std::make_shared<addr_t>(stmt, 1, 2*(0                                    ), 2*kx*ky);
+        addr_t::ptr syn1_addr = std::make_shared<addr_t>(stmt, 1, 2*(kx*ky                                ), 2*kx*ky);
+        addr_t::ptr neu0_addr = std::make_shared<addr_t>(stmt, 1, 2*(2*kx*ky                              ), 2*sp_bt*xi*yi);
+        addr_t::ptr neu1_addr = std::make_shared<addr_t>(stmt, 1, 2*(2*kx*ky + sp_bt*xi*yi                ), 2*sp_bt*xi*yi);
+        addr_t::ptr res0_addr = std::make_shared<addr_t>(stmt, 1, 2*(2*kx*ky + 2*sp_bt*xi*yi              ), 2*sp_bt*xo*yo);
+        addr_t::ptr res1_addr = std::make_shared<addr_t>(stmt, 1, 2*(2*kx*ky + 2*sp_bt*xi*yi + sp_bt*xo*yo), 2*sp_bt*xo*yo);
 
-        addr_t::ptr bia_addr     ; 
+        addr_t::ptr bia0_addr    ; 
+        addr_t::ptr bia1_addr    ; 
         addr_t::ptr bia_res0_addr; 
         addr_t::ptr bia_res1_addr; 
-        addr_t::ptr tmp_addr; 
         if(stmt->bias != NULL) {
-          bia_addr      = std::make_shared<addr_t>(stmt, 1, 2*(fi*kx*ky + 2*fi*xi*yi + 2*fo*xo*yo     ), 2*fo);
-          bia_res0_addr = std::make_shared<addr_t>(stmt, 1, 2*(fi*kx*ky + 2*fi*xi*yi + 2*fo*xo*yo + fo), 2*fo*xo*yo);
-          bia_res1_addr = std::make_shared<addr_t>(stmt, 1, 2*(fi*kx*ky + 2*fi*xi*yi + 3*fo*xo*yo + fo), 2*fo*xo*yo);
-          tmp_addr      = std::make_shared<addr_t>(stmt, 1, 2*(fi*kx*ky + 2*fi*xi*yi + 4*fo*xo*yo + fo), 2*tmp_size);
-
-          // load bias
-          pinst("loadv", bia_addr, bia, 2*fo);  
-        }
-        else
-          tmp_addr      = std::make_shared<addr_t>(stmt, 1, 2*(fi*kx*ky + 2*fi*xi*yi + fo*xo*yo), 2*tmp_size);
-
-        // load weight (h, w, c) -> (c, h, w)
-        pinst("loadv", tmp_addr, syn, 2*fi*kx*ky);  
-        pinst("trans", syn_addr, tmp_addr, kx*ky, fi);  
-
-        //for(int f_idx = 0; f_idx < fi; f_idx++)
-        //  for(int x_idx = 0; x_idx < kx; x_idx++)
-        //    for(int y_idx = 0; y_idx < ky; y_idx++)
-        //      pinst("loadv", syn_addr->offset(2*(f_idx*kx*ky + x_idx*ky + y_idx)), syn->offset(2*(x_idx*fi*ky + y_idx*fi + f_idx)), (int64_t)2);  
-
-        for(int iter = 0; iter < bt/2; iter++) {
-          // load neu0 (h, w, c) -> (c, h, w)
-          pinst("loadv", tmp_addr, neu->offset(2*(2*iter+0)*fi*xi*yi), 2*fi*xi*yi);  
-          pinst("trans", neu0_addr, tmp_addr, xi*yi, fi);  
-          //for(int f_idx = 0; f_idx < fi; f_idx++)
-          //  for(int x_idx = 0; x_idx < xi; x_idx++)
-          //    for(int y_idx = 0; y_idx < yi; y_idx++)
-          //      pinst("loadv", neu0_addr->offset(2*(f_idx*xi*yi + x_idx*yi + y_idx)), neu->offset(2*((2*iter+0)*fi*xi*yi + x_idx*fi*yi + y_idx*fi + f_idx)), (int64_t)2);  
-
-          // load neu1 (h, w, c) -> (c, h, w)
-          pinst("loadv", tmp_addr, neu->offset(2*(2*iter+1)*fi*xi*yi), 2*fi*xi*yi);  
-          pinst("trans", neu1_addr, tmp_addr, xi*yi, fi);  
-          //for(int f_idx = 0; f_idx < fi; f_idx++)
-          //  for(int x_idx = 0; x_idx < xi; x_idx++)
-          //    for(int y_idx = 0; y_idx < yi; y_idx++)
-          //      pinst("loadv", neu1_addr->offset(2*(f_idx*xi*yi + x_idx*yi + y_idx)), neu->offset(2*((2*iter+1)*fi*xi*yi + x_idx*fi*yi + y_idx*fi + f_idx)), (int64_t)2);  
-
-          // conv0 for each channel
-          for(int f_idx = 0; f_idx < fo; f_idx++) {
-            pinst("conv", res0_addr->offset(2*f_idx*xo*yo), syn_addr->offset(2*f_idx*kx*ky), neu0_addr->offset(2*f_idx*xi*yi), (int64_t)1, (int64_t)1, kx, ky, xi, yi, (int64_t)1, sx, sy, px, py);
-            // add bias
-            if(stmt->bias != NULL)
-              pinst("cycleadd", bia_res0_addr->offset(2*f_idx*xo*yo), res0_addr->offset(2*f_idx*xo*yo), bia_addr->offset(2*f_idx), 2*xo*yo, (int64_t)2);
-          }
-
-          // conv1 for each channel
-          for(int f_idx = 0; f_idx < fo; f_idx++) {
-            pinst("conv", res1_addr->offset(2*f_idx*xo*yo), syn_addr->offset(2*f_idx*kx*ky), neu1_addr->offset(2*f_idx*xi*yi), (int64_t)1, (int64_t)1, kx, ky, xi, yi, (int64_t)1, sx, sy, px, py);
-            // add bias
-            if(stmt->bias != NULL)
-              pinst("cycleadd", bia_res1_addr->offset(2*f_idx*xo*yo), res1_addr->offset(2*f_idx*xo*yo), bia_addr->offset(2*f_idx), 2*xo*yo, (int64_t)2);
-          }
-
-          // store res0 (c, h, w) -> (h, w, c)
-          if(stmt->bias != NULL) {
-            pinst("trans", tmp_addr, bia_res0_addr, fo, xo*yo);  
-            pinst("storev", dst->offset((2*iter+0)*2*fo*xo*yo), tmp_addr, 2*fo*xo*yo);  
-          }
-          else {
-            pinst("trans", tmp_addr, res0_addr, fo, xo*yo);  
-            pinst("storev", dst->offset((2*iter+0)*2*fo*xo*yo), tmp_addr, 2*fo*xo*yo);  
-          }
-          //for(int x_idx = 0; x_idx < xo; x_idx++)
-          //  for(int y_idx = 0; y_idx < yo; y_idx++)
-          //    for(int f_idx = 0; f_idx < fo; f_idx++)
-          //      if(stmt->bias != NULL)
-          //        pinst("storev", dst->offset(2*((2*iter+0)*fo*xo*yo + x_idx*yo*fo + y_idx*fo + f_idx)), bia_res0_addr->offset(2*(f_idx*xo*yo + x_idx*yo + y_idx)), (int64_t)2);  
-          //      else
-          //        pinst("storev", dst->offset(2*((2*iter+0)*fo*xo*yo + x_idx*yo*fo + y_idx*fo + f_idx)), res0_addr->offset(2*(f_idx*xo*yo + x_idx*yo + y_idx)), (int64_t)2);  
-
-
-          // store res1 (c, h, w) -> (h, w, c)
-          if(stmt->bias != NULL) {
-            pinst("trans", tmp_addr, bia_res1_addr, fo, xo*yo);  
-            pinst("storev", dst->offset((2*iter+1)*2*fo*xo*yo), tmp_addr, 2*fo*xo*yo);  
-          }
-          else {
-            pinst("trans", tmp_addr, res1_addr, fo, xo*yo);  
-            pinst("storev", dst->offset((2*iter+1)*2*fo*xo*yo), tmp_addr, 2*fo*xo*yo);  
-          }
-          //for(int x_idx = 0; x_idx < xo; x_idx++)
-          //  for(int y_idx = 0; y_idx < yo; y_idx++)
-          //    for(int f_idx = 0; f_idx < fo; f_idx++)
-          //      if(stmt->bias != NULL)
-          //        pinst("storev", dst->offset(2*((2*iter+1)*fo*xo*yo + x_idx*yo*fo + y_idx*fo + f_idx)), bia_res1_addr->offset(2*(f_idx*xo*yo + x_idx*yo + y_idx)), (int64_t)2);  
-          //      else
-          //        pinst("storev", dst->offset(2*((2*iter+1)*fo*xo*yo + x_idx*yo*fo + y_idx*fo + f_idx)), res1_addr->offset(2*(f_idx*xo*yo + x_idx*yo + y_idx)), (int64_t)2);  
+          bia0_addr     = std::make_shared<addr_t>(stmt, 1, 2*(2*kx*ky + 2*sp_bt*xi*yi + 2*sp_bt*xo*yo    ), (int64_t)2);
+          bia1_addr     = std::make_shared<addr_t>(stmt, 1, 2*(2*kx*ky + 2*sp_bt*xi*yi + 2*sp_bt*xo*yo + 1), (int64_t)2);
+          bia_res0_addr = std::make_shared<addr_t>(stmt, 1, 2*(2*kx*ky + 2*sp_bt*xi*yi + 2*sp_bt*xo*yo + 2), 2*sp_bt*xo*yo);
+          bia_res1_addr = std::make_shared<addr_t>(stmt, 1, 2*(2*kx*ky + 2*sp_bt*xi*yi + 3*sp_bt*xo*yo + 2), 2*sp_bt*xo*yo);
         }
 
-        if(bt%2) {
-          // load neu0 (h, w, c) -> (c, h, w)
-          pinst("loadv", tmp_addr, neu->offset(2*(bt-1)*fi*xi*yi), 2*fi*xi*yi);  
-          pinst("trans", neu0_addr, tmp_addr, xi*yi, fi);  
+        int fi_id_0;
+        int fi_id_1;
+        int64_t comp_bt;
+        for(int bt_id = 0; bt_id < bt_num; bt_id++) {
+          if((bt_id == bt_num-1) && (bt%sp_bt != 0))
+            comp_bt = bt%sp_bt;
+          else
+            comp_bt = sp_bt;
 
-          // conv0 for each channel
-          for(int f_idx = 0; f_idx < fo; f_idx++) {
-            pinst("conv", res0_addr->offset(2*f_idx*xo*yo), syn_addr->offset(2*f_idx*kx*ky), neu0_addr->offset(2*f_idx*xi*yi), (int64_t)1, (int64_t)1, kx, ky, xi, yi, (int64_t)1, sx, sy, px, py);
-            // add bias
+          for(int iter = 0; iter < fi/2; iter++) {
+            fi_id_0 = 2*iter + 0;
+            fi_id_1 = 2*iter + 1;
+
+            // load neu0
+            pinst("strideio", neu0_addr, neu->offset(2*(bt_id*sp_bt*fi*xi*yi + fi_id_0)), (int64_t)2, 2*fi, comp_bt*xi*yi);
+            // load weight0
+            pinst("strideio", syn0_addr, syn->offset(2*fi_id_0), (int64_t)2, 2*fi, kx*ky);
+            // load bias0
             if(stmt->bias != NULL)
-              pinst("cycleadd", bia_res0_addr->offset(2*f_idx*xo*yo), res0_addr->offset(2*f_idx*xo*yo), bia_addr->offset(2*f_idx), 2*xo*yo, (int64_t)2);
+              pinst("loadv", bia0_addr, bia->offset(2*fi_id_0), (int64_t)2);
+
+            // load neu1
+            pinst("strideio", neu1_addr, neu->offset(2*(bt_id*sp_bt*fi*xi*yi + fi_id_1)), (int64_t)2, 2*fi, comp_bt*xi*yi);
+            // load weight1
+            pinst("strideio", syn1_addr, syn->offset(2*fi_id_1), (int64_t)2, 2*fi, kx*ky);
+            // load bias1
+            if(stmt->bias != NULL)
+              pinst("loadv", bia1_addr, bia->offset(2*fi_id_1), (int64_t)2);
+
+            // conv0
+            pinst("conv", res0_addr, syn0_addr, neu0_addr, (int64_t)1, (int64_t)1, kx, ky, xi, yi, comp_bt, sx, sy, px, py);
+            // add bias0
+            if(stmt->bias != NULL)
+              pinst("cycleadd", bia_res0_addr, res0_addr, bia0_addr, 2*comp_bt*xo*yo, (int64_t)2);
+
+            // conv1
+            pinst("conv", res1_addr, syn1_addr, neu1_addr, (int64_t)1, (int64_t)1, kx, ky, xi, yi, comp_bt, sx, sy, px, py);
+            // add bias1
+            if(stmt->bias != NULL)
+              pinst("cycleadd", bia_res1_addr, res1_addr, bia1_addr, 2*comp_bt*xo*yo, (int64_t)2);
+
+            // store res0
+            if(stmt->bias != NULL)
+              pinst("strideio", dst->offset(2*(bt_id*sp_bt*fi*xo*yo + fi_id_0)), bia_res0_addr, (int64_t)2, 2*fi, comp_bt*xo*yo);
+            else
+              pinst("strideio", dst->offset(2*(bt_id*sp_bt*fi*xo*yo + fi_id_0)), res0_addr, (int64_t)2, 2*fi, comp_bt*xo*yo);
+
+            // store res1
+            if(stmt->bias != NULL)
+              pinst("strideio", dst->offset(2*(bt_id*sp_bt*fi*xo*yo + fi_id_1)), bia_res1_addr, (int64_t)2, 2*fi, comp_bt*xo*yo);
+            else
+              pinst("strideio", dst->offset(2*(bt_id*sp_bt*fi*xo*yo + fi_id_1)), res1_addr, (int64_t)2, 2*fi, comp_bt*xo*yo);
           }
 
-          // store res0 (c, h, w) -> (h, w, c)
-          if(stmt->bias != NULL) {
-            pinst("trans", tmp_addr, bia_res0_addr, fo, xo*yo);  
-            pinst("storev", dst->offset((bt-1)*2*fo*xo*yo), tmp_addr, 2*fo*xo*yo);  
-          }
-          else {
-            pinst("trans", tmp_addr, res0_addr, fo, xo*yo);  
-            pinst("storev", dst->offset((bt-1)*2*fo*xo*yo), tmp_addr, 2*fo*xo*yo);  
+          if(fi%2) {
+            fi_id_0 = fi - 1;
+
+            // load neu0
+            pinst("strideio", neu0_addr, neu->offset(2*(bt_id*sp_bt*fi*xi*yi + fi_id_0)), (int64_t)2, 2*fi, comp_bt*xi*yi);
+            // load weight0
+            pinst("strideio", syn0_addr, syn->offset(2*fi_id_0), (int64_t)2, 2*fi, kx*ky);
+            // load bias0
+            if(stmt->bias != NULL)
+              pinst("loadv", bia0_addr, bia->offset(2*fi_id_0), (int64_t)2);
+
+            // conv0
+            pinst("conv", res0_addr, syn0_addr, neu0_addr, (int64_t)1, (int64_t)1, kx, ky, xi, yi, comp_bt, sx, sy, px, py);
+            // add bias0
+            if(stmt->bias != NULL)
+              pinst("cycleadd", bia_res0_addr, res0_addr, bia0_addr, 2*comp_bt*xo*yo, (int64_t)2);
+
+            // store res0
+            if(stmt->bias != NULL)
+              pinst("strideio", dst->offset(2*(bt_id*sp_bt*fi*xo*yo + fi_id_0)), bia_res0_addr, (int64_t)2, 2*fi, comp_bt*xo*yo);
+            else
+              pinst("strideio", dst->offset(2*(bt_id*sp_bt*fi*xo*yo + fi_id_0)), res0_addr, (int64_t)2, 2*fi, comp_bt*xo*yo);
           }
         }
       }
@@ -4625,47 +4872,144 @@ void exec(symbol_stmt_t::ptr stmt) {
         int64_t yo = (yi + 2*py - ky + sy) / sy;
         // data_size: 2byte
         int64_t total_size;
-        total_size = 2*fi*xi*yi + 2*fi*xo*yo;
-        if(2*total_size > 1048576) {
+        int64_t sp_bt = bt;
+        int bt_num = 0;
+        int64_t sp_fi = fi;
+        int fi_num = 0;
+        if(2*(2*fi*xi*yi + 2*fi*xo*yo) <= 1048576) {
+          sp_fi = fi;
+          fi_num = 1;
+          while(1) {
+            bt_num++;
+            sp_bt = bt%bt_num ? bt/bt_num+1 : bt/bt_num;
+            total_size = 2*sp_bt*fi*xi*yi + 2*sp_bt*fi*xo*yo;
+            if(2*total_size <= 1048576)  break;
+          }
+        }
+        else if(2*(2*xi*yi + 2*xo*yo) <= 1048576) {
+          sp_bt = 1;
+          bt_num = bt;
+          while(1) {
+            fi_num++;
+            sp_fi = fi%fi_num ? fi/fi_num+1 : fi/fi_num;
+            total_size = 2*sp_fi*xi*yi + 2*sp_fi*xo*yo;
+            if(2*total_size <= 1048576)  break;
+          }
+        }
+        else {
           printf("parser.cpp: POOL too large to handle!\n");
           exit(0);
         }
 
-        //pinst("pool", res, im, fi, kx, ky, sx, sy, xi, yi, bt, stmt->pad_x, stmt->pad_y);
-        addr_t::ptr neu0_addr = std::make_shared<addr_t>(stmt, 1, 2*(0                    ), 2*fi*xi*yi);
-        addr_t::ptr neu1_addr = std::make_shared<addr_t>(stmt, 1, 2*(fi*xi*yi             ), 2*fi*xi*yi);
-        addr_t::ptr res0_addr = std::make_shared<addr_t>(stmt, 1, 2*(2*fi*xi*yi           ), 2*fi*xo*yo);
-        addr_t::ptr res1_addr = std::make_shared<addr_t>(stmt, 1, 2*(2*fi*xi*yi + fi*xo*yo), 2*fi*xo*yo);
+        addr_t::ptr neu0_addr = std::make_shared<addr_t>(stmt, 1, 2*(0                                ), 2*sp_bt*sp_fi*xi*yi);
+        addr_t::ptr neu1_addr = std::make_shared<addr_t>(stmt, 1, 2*(sp_bt*sp_fi*xi*yi                ), 2*sp_bt*sp_fi*xi*yi);
+        addr_t::ptr res0_addr = std::make_shared<addr_t>(stmt, 1, 2*(2*sp_bt*sp_fi*xi*yi              ), 2*sp_bt*sp_fi*xo*yo);
+        addr_t::ptr res1_addr = std::make_shared<addr_t>(stmt, 1, 2*(2*sp_bt*sp_fi*xi*yi + sp_fi*xo*yo), 2*sp_bt*sp_fi*xo*yo);
 
-        for(int iter = 0; iter < bt/2; iter++) {
-          // load neu0
-          pinst("loadv", neu0_addr, src->offset(2*(2*iter+0)*fi*xi*yi), 2*fi*xi*yi);  
+        if(fi_num == 1 && sp_fi == fi) {
+          int64_t comp_bt_0;
+          int64_t comp_bt_1;
+          int bt_id_0;
+          int bt_id_1;
+          for(int iter = 0; iter < bt_num/2; iter++) {
+            bt_id_0 = 2*iter + 0;
+            if((bt_id_0 == bt_num-1) && (bt%sp_bt != 0))
+              comp_bt_0 = bt%sp_bt;
+            else
+              comp_bt_0 = sp_bt;
 
-          // load neu1
-          pinst("loadv", neu1_addr, src->offset(2*(2*iter+1)*fi*xi*yi), 2*fi*xi*yi);  
+            bt_id_1 = 2*iter + 1;
+            if((bt_id_1 == bt_num-1) && (bt%sp_bt != 0))
+              comp_bt_1 = bt%sp_bt;
+            else
+              comp_bt_1 = sp_bt;
 
-          // pool0
-          pinst("pool", res0_addr, neu0_addr, fi, kx, ky, sx, sy, xi, yi, (int64_t)1, px, py);
-                                                                  
-          // pool1                                                
-          pinst("pool", res1_addr, neu1_addr, fi, kx, ky, sx, sy, xi, yi, (int64_t)1, px, py);
+            // load neu0
+            pinst("loadv", neu0_addr, src->offset(2*bt_id_0*sp_bt*fi*xi*yi), 2*comp_bt_0*fi*xi*yi);  
+            // load neu1
+            pinst("loadv", neu1_addr, src->offset(2*bt_id_1*sp_bt*fi*xi*yi), 2*comp_bt_1*fi*xi*yi);  
 
-          // store res0
-          pinst("storev", dst->offset(2*(2*iter+0)*fi*xo*yo), res0_addr, 2*fi*xo*yo);  
+            // pool0
+            pinst("pool", res0_addr, neu0_addr, fi, kx, ky, sx, sy, xi, yi, comp_bt_0, px, py);
+            // pool1                                                
+            pinst("pool", res1_addr, neu1_addr, fi, kx, ky, sx, sy, xi, yi, comp_bt_1, px, py);
 
-          // store res1
-          pinst("storev", dst->offset(2*(2*iter+1)*fi*xo*yo), res1_addr, 2*fi*xo*yo);  
+            // store res0
+            pinst("storev", dst->offset(2*bt_id_0*sp_bt*fi*xo*yo), res0_addr, 2*comp_bt_0*fi*xo*yo);  
+            // store res1
+            pinst("storev", dst->offset(2*bt_id_1*sp_bt*fi*xo*yo), res1_addr, 2*comp_bt_1*fi*xo*yo);  
+          }
+
+          if(bt_num%2) {
+            bt_id_0 = bt_num - 1;
+            if(bt%sp_bt != 0)
+              comp_bt_0 = bt%sp_bt;
+            else
+              comp_bt_0 = sp_bt;
+
+            // load neu0
+            pinst("loadv", neu0_addr, src->offset(2*bt_id_0*sp_bt*fi*xi*yi), 2*comp_bt_0*fi*xi*yi);  
+
+            // pool0
+            pinst("pool", res0_addr, neu0_addr, fi, kx, ky, sx, sy, xi, yi, comp_bt_0, px, py);
+
+            // store res0
+            pinst("storev", dst->offset(2*bt_id_0*sp_bt*fi*xo*yo), res0_addr, 2*comp_bt_0*fi*xo*yo);  
+          }
         }
 
-        if(bt%2) {
-          // load neu0
-          pinst("loadv", neu0_addr, src->offset(2*(bt-1)*fi*xi*yi), 2*fi*xi*yi);  
+        else if(sp_bt == 1 && bt_num == bt) {
+          int64_t comp_fi_0;
+          int64_t comp_fi_1;
+          int fi_id_0;
+          int fi_id_1;
+          for(int bt_id = 0; bt_id < bt; bt_id++) {
+            for(int iter = 0; iter < fi_num/2; iter++) {
+              fi_id_0 = 2*iter + 0;
+              if((fi_id_0 == fi_num-1) && (fi%sp_fi != 0))
+                comp_fi_0 = fi%sp_fi;
+              else
+                comp_fi_0 = sp_fi;
 
-          // pool0
-          pinst("pool", res0_addr, neu0_addr, fi, kx, ky, sx, sy, xi, yi, (int64_t)1, px, py);
+              fi_id_1 = 2*iter + 1;
+              if((fi_id_1 == fi_num-1) && (fi%sp_fi != 0))
+                comp_fi_1 = fi%sp_fi;
+              else
+                comp_fi_1 = sp_fi;
 
-          // store res0
-          pinst("storev", dst->offset(2*(bt-1)*fi*xo*yo), res0_addr, 2*fi*xo*yo);  
+              // load neu0
+              pinst("strideio", neu0_addr, src->offset(2*(bt_id*fi*xi*yi + fi_id_0*sp_fi)), 2*comp_fi_0, 2*fi, xi*yi);  
+              // load neu1
+              pinst("strideio", neu1_addr, src->offset(2*(bt_id*fi*xi*yi + fi_id_1*sp_fi)), 2*comp_fi_1, 2*fi, xi*yi);  
+
+              // pool0
+              pinst("pool", res0_addr, neu0_addr, comp_fi_0, kx, ky, sx, sy, xi, yi, (int64_t)1, px, py);
+              // pool1                                                
+              pinst("pool", res1_addr, neu1_addr, comp_fi_1, kx, ky, sx, sy, xi, yi, (int64_t)1, px, py);
+
+              // store res0
+              pinst("strideio", dst->offset(2*(bt_id*fi*xo*yo + fi_id_0*sp_fi)), res0_addr, 2*comp_fi_0, 2*fi, xo*yo);  
+              // store res1
+              pinst("strideio", dst->offset(2*(bt_id*fi*xo*yo + fi_id_1*sp_fi)), res1_addr, 2*comp_fi_1, 2*fi, xo*yo);  
+            }
+
+            if(fi_num%2) {
+              fi_id_0 = fi_num - 1;
+              if(fi%sp_fi != 0)
+                comp_fi_0 = fi%sp_fi;
+              else
+                comp_fi_0 = sp_fi;
+
+              // load neu0
+              pinst("strideio", neu0_addr, src->offset(2*(bt_id*fi*xi*yi + fi_id_0*sp_fi)), 2*comp_fi_0, 2*fi, xi*yi);  
+
+              // pool0
+              pinst("pool", res0_addr, neu0_addr, comp_fi_0, kx, ky, sx, sy, xi, yi, (int64_t)1, px, py);
+
+              // store res0
+              pinst("strideio", dst->offset(2*(bt_id*fi*xo*yo + fi_id_0*sp_fi)), res0_addr, 2*comp_fi_0, 2*fi, xo*yo);  
+            }
+          }
         }
       }
     }
