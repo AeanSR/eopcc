@@ -127,9 +127,9 @@ struct coroutine_t {
 
 struct future_t {
   bool finished = false;
-  coroutine_t* _ftcb = nullptr;
-#define await(fut) do{if([&](auto&& _fut){if(!_fut||_fut->finished)return false;_fut->_ftcb=this;_crbp=__LINE__;return true;}(fut))return;case __LINE__:;}while(0)
-#define finish(fut) do{if((fut)->_ftcb)eq.emplace(ellapse(0),(fut)->_ftcb);fut->finished=true;}while(0)
+  std::vector<coroutine_t*> _ftcb;
+#define await(fut) do{if([&](auto&& _fut){if(!_fut||_fut->finished)return false;_fut->_ftcb.push_back(this);_crbp=__LINE__;return true;}(fut))return;case __LINE__:;}while(0)
+#define finish(fut) do{for(auto&&p:(fut)->_ftcb)eq.emplace(ellapse(0),p);fut->finished=true;}while(0)
 #define finish_at(fut,ts) do{future_scheduler().schedule(ts,fut);}while(0)
   using ptr = std::shared_ptr<future_t>;
   static ptr new_() { return std::make_shared<future_t>(); }
@@ -473,6 +473,7 @@ struct param_t {
 struct reg_t : public param_t {
   int64_t regid;
   virtual int64_t eval() const { return regid; }
+  reg_t(int64_t regid) : regid(regid) { }
 };
 
 struct imm_t : public param_t {
@@ -778,17 +779,9 @@ struct ppu_t : public coroutine_t {
       hibernate;
     }
   )
-  future_t::ptr issue(std::string op, std::vector<param_t::ptr> args) {
+  future_t::ptr issue(std::string op, std::vector<int64_t> args) {
     future_t::ptr fut = future_t::new_();
-    std::vector<int64_t> size;
-    if (op in cc("pool"s, "conv"s, "mm"s, "trans"s)) {
-      for (auto&& p : args) if (p is typeid(imm_t)) size.push_back(p->eval());
-    } else if (op in cc("movsv"s)) {
-      size.push_back(line_bytes);
-    } else {
-      size.push_back(args.back()->eval());
-    }
-    reqs.emplace_back(op, size, fut); awake;
+    reqs.emplace_back(op, args, fut); awake;
     return fut;
   }
 };
@@ -857,12 +850,20 @@ struct inst_t {
 
 struct vq_t : public coroutine_t {
   std::list<inst_t> q;
+  future_t::ptr fin = future_t::new_();
 
-#define vqiio(comp, rw, ...) do { \
-          while (!rob().test_#rw(__VA_ARGS__)) \
+#define vqii(...) do { \
+          while (!rob().test_write(__VA_ARGS__)) \
             await(rob().fin); \
-          h = comp.issue(i.op, i.args); \
-          rob().lock_#rw(h, __VA_ARGS__);\
+          h = pdma().issue(i.op, i.args); \
+          rob().lock_write(h, __VA_ARGS__);\
+        } while(0)
+
+#define vqio(...) do { \
+          while (!rob().test_read(__VA_ARGS__)) \
+            await(rob().fin); \
+          h = pdma().issue(i.op, i.args); \
+          rob().lock_read(h, __VA_ARGS__);\
         } while(0)
 
 #define vqiu(startw, endw, startr, endr) do { \
@@ -887,7 +888,7 @@ struct vq_t : public coroutine_t {
         } while(0)
 
   bool load;
-  int64_t spmad, size, size2;
+  int64_t spmad, size, size2, size3, xo, yo;
   inst_t i;
   future_t::ptr h;
   std::vector<int64_t> sizes;
@@ -898,16 +899,16 @@ struct vq_t : public coroutine_t {
         load = i.args[0]->eval() < spm_size;
         spmad = i.args[load ? 1 : 0]->eval();
         size = i.args[2]->eval() * i.args[4]->eval();
-        if (load) vqiio(pdma(), write, spmad, spmad + size);
-        else vqiio(pdma(), read, spmad, spmad + size);
+        if (load) vqii(spmad, spmad + size);
+        else vqio(spmad, spmad + size);
       } else if (i.op == "loadv"s) {
         spmad = i.args[0]->eval();
         size = i.args[2]->eval();
-        vqiio(pdma(), write, spmad, spmad + size);
+        vqii(spmad, spmad + size);
       } else if (i.op == "storev"s) {
         spmad = i.args[1]->eval();
         size = i.args[2]->eval();
-        vqiio(pdma(), read, spmad, spmad + size);
+        vqio(spmad, spmad + size);
       } else if (i.op in cc("movv"s, "act"s, "floor"s, "mulvf"s, "divvf"s, "addvf"s, "subvf"s, "subfv"s, "ltvf"s,
                             "gtvf"s, "levf"s, "gevf"s, "eqvf"s, "nevf"s)) {
         size = i.args.back()->eval();
@@ -916,7 +917,7 @@ struct vq_t : public coroutine_t {
         size = i.args.back()->eval();
         vqib(i.args[0]->eval(), i.args[0]->eval() + size,
              i.args[1]->eval(), i.args[1]->eval() + size,
-             i.args[2]->eval(), i.args[2]->eval() + size)
+             i.args[2]->eval(), i.args[2]->eval() + size);
       } else if (i.op in cc("haddv"s, "hmulv"s, "hminv"s, "hmaxv"s)) {
         size = i.args.back()->eval();
         vqih(reg_t(i.args[0]->eval()), i.args[1]->eval(), i.args[1]->eval() + size);
@@ -925,14 +926,90 @@ struct vq_t : public coroutine_t {
         for (int a = 0; a < 10; a++)
           sizes.push_back(i.args[2 + a]->eval());
         size = i.args[2]->eval() * i.args[7]->eval() * i.args[8]->eval() * i.args[9]->eval();
+        xo = (i.args[7]->eval() - i.args[3]->eval() + i.args[10]->eval() * 2 + i.args[5]->eval()) / i.args[5]->eval();
+        yo = (i.args[8]->eval() - i.args[4]->eval() + i.args[11]->eval() * 2 + i.args[6]->eval()) / i.args[6]->eval();
+        size2 = i.args[2]->eval() * xo * yo * i.args[9]->eval();
+        while (!rob().test_write(i.args[0]->eval(), i.args[0]->eval() + size2 * 2)
+            || !rob().test_read(i.args[1]->eval(), i.args[1]->eval() + size * 2))
+          await(rob().fin);
+        h = ppu().issue(i.op, sizes);
+        rob().lock_write(h, i.args[0]->eval(), i.args[0]->eval() + size2 * 2);
+        rob().lock_read(h, i.args[1]->eval(), i.args[1]->eval() + size * 2);
+      } else if (i.op in cc("conv"s)) {
+        sizes.clear();
+        for (int a = 0; a < 11; a++)
+          sizes.push_back(i.args[3 + a]->eval());
+        size = i.args[3]->eval() * i.args[7]->eval() * i.args[8]->eval() * i.args[9]->eval();
+        xo = (i.args[7]->eval() - i.args[5]->eval() + i.args[12]->eval() * 2 + i.args[10]->eval()) / i.args[10]->eval();
+        yo = (i.args[8]->eval() - i.args[6]->eval() + i.args[13]->eval() * 2 + i.args[11]->eval()) / i.args[11]->eval();
+        size2 = i.args[4]->eval() * xo * yo * i.args[9]->eval();
+        size3 = i.args[4]->eval() * i.args[5]->eval() * i.args[6]->eval() * i.args[3]->eval();
+        while (!rob().test_write(i.args[0]->eval(), i.args[0]->eval() + size2 * 2)
+            || !rob().test_read(i.args[1]->eval(), i.args[1]->eval() + size3 * 2)
+            || !rob().test_read(i.args[2]->eval(), i.args[2]->eval() + size * 2))
+          await(rob().fin);
+        h = ppu().issue(i.op, sizes);
+        rob().lock_write(h, i.args[0]->eval(), i.args[0]->eval() + size2 * 2);
+        rob().lock_read(h, i.args[1]->eval(), i.args[1]->eval() + size3 * 2);
+        rob().lock_read(h, i.args[2]->eval(), i.args[2]->eval() + size * 2);
+      } else if (i.op in cc("mm"s)) {
+        sizes.clear();
+        for (int a = 0; a < 4; a++)
+          sizes.push_back(i.args[3 + a]->eval());
+        size = i.args[3]->eval() * i.args[5]->eval() * i.args[6]->eval();
+        size2 = i.args[4]->eval() * i.args[5]->eval() * i.args[6]->eval();
+        size3 = i.args[3]->eval() * i.args[4]->eval() * i.args[6]->eval();
+        while (!rob().test_write(i.args[0]->eval(), i.args[0]->eval() + size2 * 2)
+            || !rob().test_read(i.args[1]->eval(), i.args[1]->eval() + size3 * 2)
+            || !rob().test_read(i.args[2]->eval(), i.args[2]->eval() + size * 2))
+          await(rob().fin);
+        h = ppu().issue(i.op, sizes);
+        rob().lock_write(h, i.args[0]->eval(), i.args[0]->eval() + size2 * 2);
+        rob().lock_read(h, i.args[1]->eval(), i.args[1]->eval() + size3 * 2);
+        rob().lock_read(h, i.args[2]->eval(), i.args[2]->eval() + size * 2);
+      } else if (i.op in cc("trans"s)) {
+        sizes.clear();
+        for (int a = 0; a < 2; a++)
+          sizes.push_back(i.args[2 + a]->eval());
+        size = i.args[2]->eval() * i.args[3]->eval();
+        while (!rob().test_write(i.args[0]->eval(), i.args[0]->eval() + size * 2)
+            || !rob().test_read(i.args[1]->eval(), i.args[1]->eval() + size * 2))
+          await(rob().fin);
+        h = ppu().issue(i.op, sizes);
+        rob().lock_write(h, i.args[0]->eval(), i.args[0]->eval() + size * 2);
+        rob().lock_read(h, i.args[1]->eval(), i.args[1]->eval() + size * 2);
+      } else if (i.op in cc("cycleadd"s)) {
+        size = i.args[3]->eval();
+        vqib(i.args[0]->eval(), i.args[0]->eval() + size,
+             i.args[1]->eval(), i.args[1]->eval() + size,
+             i.args[2]->eval(), i.args[2]->eval() + i.args[4]->eval());
+      } else if (i.op in cc("movsv"s)) {
+        size = line_bytes;
+        while (!rob().test_write(i.args[0]->eval(), i.args[0]->eval() + size))
+          await(rob().fin);
+        h = ppu().issue(i.op, std::vector<int64_t>{ size });
+        rob().lock_write(h, i.args[0]->eval(), i.args[0]->eval() + size);
       }
       q.pop_front();
+      finish(fin);
+      fin = future_t::new_();
       yield(ellapse(1. / frequency));
     }
     hibernate;
   })
+  void issue(inst_t i) {
+    q.push_back(i);
+    awake;
+  }
+  bool full() const {
+    return q.size() >= vq_depth;
+  }
 };
 
+vq_t& vq() {
+  static vq_t _vq;
+  return _vq;
+}
 
 struct controller_t : public coroutine_t {
   bool halted;
