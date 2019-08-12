@@ -4591,7 +4591,7 @@ void exec(symbol_stmt_t::ptr stmt) {
               pinst("loadv", syn_addr, syn->offset(2*fo_id*sp_fo*fi*kx*ky), 2*comp_fo*fi*kx*ky);  
               if(stmt->bias != NULL) {
                 // load bias
-                pinst("loadv", bia_addr->offset(2*fo_id*sp_fo), bia, 2*comp_fo);  
+                pinst("loadv", bia_addr, bia->offset(2*fo_id*sp_fo), 2*comp_fo);  
               }
 
               int iter = 0;
