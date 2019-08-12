@@ -4504,13 +4504,13 @@ void exec(symbol_stmt_t::ptr stmt) {
               pinst("loadv", syn0_addr, syn->offset(2*fo_id_0*sp_fo*fi*kx*ky), 2*comp_fo_0*fi*kx*ky);  
               // load bias0
               if(stmt->bias != NULL)
-                pinst("loadv", bia0_addr->offset(2*fo_id_0*sp_fo), bia, 2*comp_fo_0);  
+                pinst("loadv", bia0_addr, bia->offset(2*fo_id_0*sp_fo), 2*comp_fo_0);  
 
               // load weight1
               pinst("loadv", syn1_addr, syn->offset(2*fo_id_1*sp_fo*fi*kx*ky), 2*comp_fo_1*fi*kx*ky);  
               // load bias1
               if(stmt->bias != NULL)
-                pinst("loadv", bia1_addr->offset(2*fo_id_1*sp_fo), bia, 2*comp_fo_1);  
+                pinst("loadv", bia1_addr, bia->offset(2*fo_id_1*sp_fo), 2*comp_fo_1);  
 
               // conv0
               pinst("conv", res0_addr, syn0_addr, neu_addr, fi, comp_fo_0, kx, ky, xi, yi, (int64_t)1, sx, sy, px, py);
@@ -4548,7 +4548,7 @@ void exec(symbol_stmt_t::ptr stmt) {
               pinst("loadv", syn0_addr, syn->offset(2*fo_id_0*sp_fo*fi*kx*ky), 2*comp_fo_0*fi*kx*ky);  
               // load bias0
               if(stmt->bias != NULL)
-                pinst("loadv", bia0_addr->offset(2*fo_id_0*sp_fo), bia, 2*comp_fo_0);  
+                pinst("loadv", bia0_addr, bia->offset(2*fo_id_0*sp_fo), 2*comp_fo_0);  
 
               // conv0
               pinst("conv", res0_addr, syn0_addr, neu_addr, fi, comp_fo_0, kx, ky, xi, yi, (int64_t)1, sx, sy, px, py);
@@ -4720,7 +4720,7 @@ void exec(symbol_stmt_t::ptr stmt) {
 
               if(stmt->bias != NULL) {
                 // load bias
-                pinst("loadv", bia_addr->offset(2*fo_id), bia, (int64_t)2);  
+                pinst("loadv", bia_addr, bia->offset(2*fo_id), (int64_t)2);  
                 // acc_result add bias
                 if(fi_num%2 == 0)
                   pinst("cycleadd", bia_acc_addr, acc1_addr, bia_addr, 2*xo*yo, (int64_t)2);
