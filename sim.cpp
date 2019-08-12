@@ -12,6 +12,8 @@
 #include <set>
 #include <map>
 #include <iostream>
+#include <sstream>
+#include <fstream>
 #include <typeinfo>
 #include <typeindex>
 #include <cmath>
@@ -111,7 +113,8 @@ timestamp_t global_time = 0;
 #define ellapse(t) (global_time+(t))
 #define posedge(t) [](timestamp_t _t){return ellapse(((_t)*frequency-std::floor((_t)*frequency))/frequency);}(t)
 
-#define log(...) do{std::cout << "[" << global_time << "] " << __VA_ARGS__ << std::endl;}while(0)
+//#define log(...) do{std::cout << "[" << global_time << "] " << __VA_ARGS__ << std::endl;}while(0)
+#define log(...)
 
 struct coroutine_t {
   int64_t _crbp;
@@ -131,8 +134,8 @@ struct coroutine_t {
 struct future_t {
   bool finished = false;
   std::vector<coroutine_t*> _ftcb;
-#define await(fut) do{if([&](auto&& _fut){if(!_fut||_fut->finished)return false;_fut->_ftcb.push_back(this);_crbp=__LINE__;return true;}(fut))return;case __LINE__:;}while(0)
-#define finish(fut) do{for(auto&&p:(fut)->_ftcb)eq.emplace(ellapse(0),p);fut->finished=true;}while(0)
+#define await(fut) do{if([&](auto&&_fut){if(!_fut||_fut->finished)return false;_fut->_ftcb.push_back(this);return true;}(fut)){_crbp=__LINE__;return;}case __LINE__:;}while(0)
+#define finish(fut) [&](auto&&_fut){for(auto&&p:_fut->_ftcb)eq.emplace(ellapse(0),p);_fut->finished=true;}(fut)
 #define finish_at(fut,ts) do{future_scheduler().schedule(ts,fut);}while(0)
   using ptr = std::shared_ptr<future_t>;
   static ptr new_() { return std::make_shared<future_t>(); }
@@ -196,12 +199,15 @@ struct mem_t : public abstract_mem_t {
   virtual cell_t& ref(int64_t addr) {
     addr /= word_size;
     if (addr >= cells.size()) cells.resize(addr + 1);
+    
     return cells[addr];
   }
+  mem_t() = default;
+  mem_t(int64_t word_size) : word_size(word_size) { }
 };
 
 mem_t& gr() {
-  static mem_t _gr;
+  static mem_t _gr(1);
   return _gr;
 }
 
@@ -485,6 +491,8 @@ struct fimm_t : public imm_t {
   virtual int64_t eval() const { return imm; }
   friend std::ostream &operator<<(std::ostream &out, const fimm_t &t);
   virtual int visualizing() const { std::cout << *this; return 0; }
+  fimm_t(double i) : imm(i) { }
+  fimm_t() = default;
 };
 
 struct addr_t : public param_t {
@@ -496,6 +504,8 @@ struct raddr_t : public addr_t {
   virtual int64_t eval() const { return gr().ref(reg.regid).data.i; }
   friend std::ostream &operator<<(std::ostream &out, const raddr_t &t);
   virtual int visualizing() const { std::cout << *this; return 0; }
+  raddr_t(reg_t i) : reg(i) { }
+  raddr_t() = default;
 };
 
 struct iaddr_t : public addr_t {
@@ -503,6 +513,8 @@ struct iaddr_t : public addr_t {
   virtual int64_t eval() const { return imm.eval(); }
   friend std::ostream &operator<<(std::ostream &out, const iaddr_t &t);
   virtual int visualizing() const { std::cout << *this; return 0; }
+  iaddr_t(int64_t i) : imm(i) { }
+  iaddr_t() = default;
 };
 
 struct output_t : public param_t {
@@ -511,6 +523,8 @@ struct output_t : public param_t {
   virtual int64_t eval() const { return 0; }
   friend std::ostream &operator<<(std::ostream &out, const output_t &t);
   virtual int visualizing() const { std::cout << *this; return 0; }
+  output_t(std::string i) : content(i) { }
+  output_t() = default;
 };
 // reg_t:   rX
 std::ostream & operator << (std::ostream &os, const reg_t &t) {
@@ -555,18 +569,22 @@ struct rob_t : public coroutine_t {
   std::multimap<int64_t, lock_t> spm_ends;
   int64_t rob_seq = 1;
   void unlock(int64_t lock_seq) {
+    log("rob unlock " << lock_seq << ", current spm_begins: " << spm_begins.size() << ", spm_ends: " << spm_ends.size());
     if (lock_seq > 0) {
       for (auto i = gr_lock.begin(); i != gr_lock.end(); i++) {
         if (i->second.seq == lock_seq) { gr_lock.erase(i); return; }
       }
     } else {
       for (auto i = spm_begins.begin(); i != spm_begins.end(); i++) {
-        if (i->second.seq == lock_seq) { spm_begins.erase(i); break; }
+        log("rob spm_begins seq: " << i->second.seq);
+        if (i->second.seq == lock_seq) { log(__LINE__); spm_begins.erase(i); break; }
       }
       for (auto i = spm_ends.begin(); i != spm_ends.end(); i++) {
-        if (i->second.seq == lock_seq) { spm_ends.erase(i); return; }
+        log("rob spm_ends seq: " << i->second.seq);
+        if (i->second.seq == lock_seq) { log(__LINE__); spm_ends.erase(i); return; }
       }
     }
+    log("rob after unlock " << lock_seq << ", spm_begins: " << spm_begins.size() << ", spm_ends: " << spm_ends.size());
   }
 
   struct rob_request_t {
@@ -582,6 +600,7 @@ struct rob_t : public coroutine_t {
       unlock(reqs.front().lock_seq);
       reqs.pop_front();
       finish(fin);
+      log("rob finish fin");
       fin = future_t::new_();
     }
     hibernate;
@@ -595,17 +614,17 @@ struct rob_t : public coroutine_t {
   int64_t test_read(int64_t start, int64_t end) const {
     std::multimap<int64_t, lock_t> deps;
     std::set_intersection(
-        spm_begins.begin(), spm_begins.upper_bound(end),
-        spm_ends.lower_bound(start), spm_ends.end(),
+        spm_begins.begin(), spm_begins.lower_bound(end),
+        spm_ends.upper_bound(start), spm_ends.end(),
         std::inserter(deps, deps.end()), [](auto&& p1, auto&& p2){ return p1.second < p2.second; }
     );
-    return std::all_of(deps.begin(), deps.end(), [](auto&& p){return p.second.read;});
+    return deps.empty() || std::all_of(deps.begin(), deps.end(), [](auto&& p){return p.second.read;});
   }
   int64_t test_write(int64_t start, int64_t end) const {
     std::multimap<int64_t, lock_t> deps;
     std::set_intersection(
-        spm_begins.begin(), spm_begins.upper_bound(end),
-        spm_ends.lower_bound(start), spm_ends.end(),
+        spm_begins.begin(), spm_begins.lower_bound(end),
+        spm_ends.upper_bound(start), spm_ends.end(),
         std::inserter(deps, deps.end()), [](auto&& p1, auto&& p2){ return p1.second < p2.second; }
     );
     return deps.empty();
@@ -621,14 +640,14 @@ struct rob_t : public coroutine_t {
     rob_seq++; awake;
   }
   void lock_read(future_t::ptr fut, int64_t start, int64_t end) {
-    spm_begins.emplace(start, lock_t(rob_seq, true));
-    spm_ends.emplace(end, lock_t(rob_seq, true));
+    spm_begins.emplace(start, lock_t(-rob_seq, true));
+    spm_ends.emplace(end, lock_t(-rob_seq, true));
     reqs.emplace_back(-rob_seq, fut);
     rob_seq++; awake;
   }
   void lock_write(future_t::ptr fut, int64_t start, int64_t end) {
-    spm_begins.emplace(start, lock_t(rob_seq, false));
-    spm_ends.emplace(end, lock_t(rob_seq, false));
+    spm_begins.emplace(start, lock_t(-rob_seq, false));
+    spm_ends.emplace(end, lock_t(-rob_seq, false));
     reqs.emplace_back(-rob_seq, fut);
     rob_seq++; awake;
   }
@@ -685,7 +704,10 @@ struct spu_t : public coroutine_t {
       { "jz"s, +[](cell_t* d, cell_t l, cell_t r){ return d->data.i = l.data.i ? d->data.i : r.data.i, 1; } },
     };
     req.dest->det = req.lhs.det && req.rhs.det;
-    return ops[req.op](req.dest, req.lhs, req.rhs);
+    log("spu exec before: " << req.op << "," << req.dest->data.i << "," << req.lhs.data.i << "," << req.rhs.data.i);
+    int cycles = ops[req.op](req.dest, req.lhs, req.rhs);
+    log("spu exec after: " << req.op << "," << req.dest->data.i << "," << req.lhs.data.i << "," << req.rhs.data.i);
+    return cycles;
   }
   std::list<spu_request_t> reqs;
   async(
@@ -990,8 +1012,8 @@ struct controller_t : public coroutine_t {
 
   async(while(!halted){
     yield(posedge(global_time));
-    log(__LINE__);
     lbtry: { if (pc >= mq.size()) halted = true; else {
+      log("fetch inst from pc = " << pc);
       i = mq[pc++];
       tests.clear();
       gr().ref(0) = dcell = lcell = rcell = cell_t();
@@ -1016,7 +1038,6 @@ struct controller_t : public coroutine_t {
           }
         }
       }
-    log(__LINE__);
       if (i.op == "strideio"s) {
         spmad = i.args[i.args[0]->eval() < spm_size ? 1 : 0]->eval();
         size = i.args[2]->eval() * i.args[4]->eval();
@@ -1095,8 +1116,9 @@ struct controller_t : public coroutine_t {
         if (i.op in cc("nop"s)) {
         } else if (i.op in cc("halt"s)) {
           halted = true;
+        } else if (i.op in cc("printcr"s)) {
+          std::cout << std::endl;
         } else if (i.op in cc("print"s)) {
-          log(__LINE__);
           if (i.args[0] is typeid(output_t))
             std::cout << std::dynamic_pointer_cast<output_t>(i.args[0])->content;
           else if (i.args[0] is typeid(reg_t))
@@ -1134,26 +1156,35 @@ struct controller_t : public coroutine_t {
           spmad = i.args[1]->eval();
           tests.emplace_back(true, spmad, spmad + line_bytes);
           if (!std::all_of(tests.begin(), tests.end(), [](auto&& p){ return p.test(); })) lbthrow(0);
+          log(__LINE__);
           await(spm(0).get(spmad, &dcell));
+          log(__LINE__);
           gr().ref(i.args[0]->eval()).det = false;
         } else if (i.op in cc("movfs"s)) {
           yield(ellapse(1. / frequency));
           gr().ref(i.args[0]->eval()).data.f = std::dynamic_pointer_cast<fimm_t>(i.args[1])->imm;
           gr().ref(i.args[0]->eval()).det = true;
         } else if (i.op in cc("loads"s)) {
+          log("load data from address " << i.args[1]->eval() << " to reg " << i.args[0]->eval());
           await(cache().get(i.args[1]->eval(), &gr().ref(i.args[0]->eval())));
+          log("value after load: " << gr().ref(i.args[0]->eval()).data.i);
         } else if (i.op in cc("stores"s)) {
           await(cache().set(i.args[0]->eval(), &gr().ref(i.args[1]->eval())));
         } else if (i.op in cc("cvtif"s, "cvtfi"s, "noti"s, "movis"s)) {
           if (i.args[1] is typeid(iimm_t)) lcell.data.i = i.args[1]->eval();
           else lcell = gr().ref(i.args[1]->eval());
           await(spu().issue(i.op, &dcell, lcell, rcell));
+          log("unary scalar inst write " << dcell.data.i << " to reg " << i.args[0]->eval());
           gr().ref(i.args[0]->eval()) = dcell;
+          log("value after write: " << gr().ref(i.args[0]->eval()).data.i);
         } else {
           if (i.args[1] is typeid(iimm_t)) lcell.data.i = i.args[1]->eval();
           else lcell = gr().ref(i.args[1]->eval());
           if (i.args[2] is typeid(iimm_t)) rcell.data.i = i.args[2]->eval();
-          else rcell = gr().ref(i.args[2]->eval());
+          else { rcell = gr().ref(i.args[2]->eval());
+          log("read rhs from reg " << i.args[2]->eval());
+          log("reg value: " << gr().ref(i.args[2]->eval()).data.i << ", rcell value: " << rcell.data.i);
+          }
           await(spu().issue(i.op, &dcell, lcell, rcell));
           gr().ref(i.args[0]->eval()) = dcell;
         }
@@ -1161,6 +1192,7 @@ struct controller_t : public coroutine_t {
       stuck = false;
     } } continue; lbcatch: {
       if (tno) {
+        log(__LINE__);
         pc = -1;
         std::swap(pc, pce);
         std::swap(mq, exq);
@@ -1168,14 +1200,17 @@ struct controller_t : public coroutine_t {
         continue;
       } else {
         if (stuck == true) {
+          log(__LINE__);
 
         } else if (in_except || pce >= 0 || !ex_entry.empty()) {
+          log(__LINE__);
           pc--;
           std::swap(pc, pce);
           std::swap(mq, exq);
           in_except = !in_except;
           stuck = true;
           if (pc < 0) {
+            log(__LINE__);
             pc = ex_entry.front();
             ex_entry.pop_front();
           }
@@ -1183,11 +1218,68 @@ struct controller_t : public coroutine_t {
         }
       }
     }
+    log(__LINE__ << " " << rob().fin << ":" << rob().fin->finished);
     await(rob().fin);
+    log(__LINE__);
     stuck = false;
   })
 };
 
+void readraw(std::vector<inst_t>& main_inst, std::vector<inst_t>& except_inst, const char * filename) {
+  std::ifstream sf(filename);
+  char c;
+  std::string line;
+  while((c=sf.get()) != EOF) {
+    if (c == '\n') {
+      if (line == "main:"s) {
+
+      } else if (line == "except:") {
+        std::swap(main_inst, except_inst);
+      } else {
+        std::istringstream ss(line);
+        inst_t i;
+        ss >> i.pc;
+        while((c=ss.get())==' ');
+        do { i.op.push_back(c); } while(!((c=ss.get()) in cc(' ', EOF)));
+        while ((c=ss.get()) != EOF) {
+          if (c in cc('#') && i.op == "movfs"s) {
+            double v;
+            ss >> v;
+            i.args.push_back(std::make_shared<fimm_t>(v));
+          } else if (c in cc('#', '!')) {
+            int64_t v;
+            ss >> v;
+            i.args.push_back(std::make_shared<iimm_t>(v));
+          } else if (c == 'p') {
+            ss.get(); // t
+            ss.get(); // r
+            ss.get(); // /
+            c = ss.get();
+            int64_t v;
+            ss >> v;
+            if (c == 'r') i.args.push_back(std::make_shared<raddr_t>(reg_t(v)));
+            if (c == '#') i.args.push_back(std::make_shared<iaddr_t>(v));
+          } else if (c == 'r') {
+            int64_t v;
+            ss >> v;
+            i.args.push_back(std::make_shared<reg_t>(v));
+          } else {
+            std::string num, str;
+            do { num.push_back(c); c=ss.get(); } while(c>='0' && c<='9');
+            for (int count = 0; count < std::atoi(num.c_str()); count++) str.push_back(ss.get());
+            i.args.push_back(std::make_shared<output_t>(str));
+          }
+          while(!(ss.get() in cc(' ', EOF)));
+        }
+        except_inst.push_back(i);
+      }
+      line.clear();
+    } else {
+      line.push_back(c);
+    }
+  }
+}
+/*
 bool is_number_in_readraw(char s[]) {
   // [0-9][0-9]*
   for (int i = 0; i < strlen(s); i++)
@@ -1300,12 +1392,13 @@ int checkinput(const std::vector<inst_t> main_inst, const std::vector<inst_t> ex
   printf("except:\n");
   visualizing_in_checkinput(except_inst);
   return 0;
-}
+}*/
 
 int main(int argc, char** argv) {
   controller_t controller;
   readraw(controller.mq, controller.exq, (argc > 1 ? argv[1] : "eop.out"));
   controller.exq.insert(controller.exq.begin(), controller.mq.begin(), controller.mq.end());
+  //checkinput(controller.mq, controller.exq);
   for (auto&& p : coroutine_t::list())
     p->operator()();
   while(!eq.empty()) {
@@ -1315,7 +1408,7 @@ int main(int argc, char** argv) {
       e.callback->operator()();
     }
   }
-  std::cout << "[" << global_time << "] " << "processor halted." << std::endl;
+  std::cout << "[" << global_time << "] " << "processor halted: " << controller.halted << "." << std::endl;
 /*
   std::vector<inst_t> main_inst;
   std::vector<inst_t> except_inst;

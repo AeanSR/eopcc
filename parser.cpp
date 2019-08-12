@@ -3744,7 +3744,7 @@ genval_t eval(symbol_val_t::ptr val) {
     +[](std::shared_ptr<symbol_call_t> val)->genval_t {
       if (val->async) {
         auto async_entry = inst("nop");
-        pinst("raise", reg_t(0), async_entry);
+        pinst("raise", async_entry);
         elst.push_back(async_entry);
         swap(elst, lst);
         except_reg = reg_t::alloc(val);
@@ -4113,8 +4113,10 @@ void exec(symbol_stmt_t::ptr stmt) {
 
     +[](std::shared_ptr<symbol_print_t> stmt) {
       std::vector<symbol_val_t::ptr> tp = stmt->objs;
+      bool first = true;
       for (auto&& o : tp) {
         auto arg = eval(o);
+        if (!first) pinst("print", " ");
         switch(arg.index()) {
         case 0: pinst("print", "<null>"); break;
         case 1: pinst((o->type is typeid(symbol_float_type_t) ? "printf"s : "print"s), std::get<reg_t>(arg)); break;
@@ -4122,7 +4124,9 @@ void exec(symbol_stmt_t::ptr stmt) {
         case 3: pinst("print", "<function>"); break;
         case 4: pinst("print", std::get<std::string>(arg)); break;
         }
+        first = false;
       }
+      pinst("printcr");
     },
 
     +[](std::shared_ptr<symbol_alloc_t> stmt) {
@@ -4213,6 +4217,7 @@ void exec(symbol_stmt_t::ptr stmt) {
       reg_t r = reg_t(0);
       if (stmt->cond) {
         r = std::get<reg_t>(eval(stmt->cond));
+        pinst("eqi", r, reg_t(0), r);
       }
       pinst("jz", r, break_point);
     },
