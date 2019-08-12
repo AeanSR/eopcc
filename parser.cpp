@@ -2406,7 +2406,7 @@ symbol_t::ptr prob(std::shared_ptr<ast_node_t> ast) {
     +[](std::shared_ptr<cast_t> ast)->symbol_t::ptr {
       auto type = prob(ast->type)->to<symbol_type_t>();
       auto lhs = prob(ast->lhs)->to<symbol_val_t>();
-      if (lhs->type->external && lhs->type is typeid(symbol_vec_type_t) && !lhs->lvalue()) {
+      if (lhs->type->external && lhs->type is typeid(symbol_vec_type_t) && (!lhs->lvalue() || !(type is typeid(symbol_vec_type_t) && type->external))) {
         ast->error() << "extern vector must be explicitly moved to intern variables before participating operations." << ast->eol();
         lhs->type->note() << "type defined from here:" << lhs->type->eol();
       }
