@@ -35,11 +35,11 @@ int verbose_level = 0;
 
 std::set<std::string> keywords = {
   "if", "else", "for", "do", "while", "continue", "break", "return", "print",
-  "sizeof", "typeof",
-  "def", "async", "await", "except",
+  "sizeof", "typeof", "decltype",
+  "def", "redef", "async", "await", "except",
   "conv", "pool", "mm", "act", "trans", "cycleadd", "floor", "strideio",
   "int", "float", "vector", "extern", "intern", "const", "null",
-  "EOPConvolution", "EOPFullyConnected", "EOPPooling", "EOPConcat", "EOPSplit", "EOPDepthwiseConv"
+  "EOPConvolution", "EOPFullyConnected", "EOPPooling", "EOPDepthwiseConv"
 };
 
 std::set<std::string> punctuators = {
@@ -154,17 +154,17 @@ struct cursor_t {
   cursor_t() : lineno(0), charno(0) { }
   cursor_t(int l, int c) : lineno(l), charno(c) { }
   std::ostream& error() {
-    return errors_occurred++, rewind_function_instantiation_stack(), std::cout << lineno + 1 << ":" << charno + 1 << ":" << "error: ";
+    return errors_occurred++, rewind_function_instantiation_stack(), std::cout << lineno + 1 << ":" << charno + 1 << ":" << "\033[1;31merror:\033[0m ";
   }
   std::ostream& warn() {
-    return warnings_occurred++, rewind_function_instantiation_stack(), std::cout << lineno + 1 << ":" << charno + 1 << ":" << "warning: ";
+    return warnings_occurred++, rewind_function_instantiation_stack(), std::cout << lineno + 1 << ":" << charno + 1 << ":" << "\033[1;34mwarning:\033[0m ";
   }
   std::ostream& note() {
-    return std::cout << lineno + 1 << ":" << charno + 1 << ":" << "note: ";
+    return std::cout << lineno + 1 << ":" << charno + 1 << ":" << "\033[1mnote: ";
   }
   std::string eol() {
     std::stringstream ss;
-    ss << std::endl << "\t" << raw[lineno] << (raw[lineno].back() == '\n' ? "\t" : "\n\t") << std::string(charno, ' ') << "^" << std::endl << std::endl;
+    ss << "\033[0m" << std::endl << "\t" << raw[lineno] << (raw[lineno].back() == '\n' ? "\t" : "\n\t") << std::string(charno, ' ') << "^" << std::endl << std::endl;
     return ss.str();
   }
 };
@@ -1236,11 +1236,9 @@ struct ctrlstmt_t : public ast_node_t {
   }
 };
 
-struct type_t : public ast_node_t {
+struct basetype_t : public ast_node_t {
   int type;
   enum { INT, FLOAT, VECTOR, EXCEPT };
-  int storage;
-  enum { INTERN, EXTERN, CONST };
   std::vector<std::shared_ptr<expr_t>> size;
 
   virtual bool _parse() {
@@ -1248,10 +1246,6 @@ struct type_t : public ast_node_t {
       if (expect_key("except")) {
         type = EXCEPT; return true;
       }
-      if (expect_key("intern")) storage = INTERN;
-      else if (expect_key("extern")) storage = EXTERN;
-      else if (expect_key("const")) storage = CONST;
-      else storage = INTERN;
       if (expect_key("int")) type = INT;
       else if (expect_key("float")) type = FLOAT;
       else if (expect_key("vector")) type = VECTOR;
@@ -1262,6 +1256,40 @@ struct type_t : public ast_node_t {
         return true;
       } else return true;
     }());
+  }
+};
+
+struct spectype_t : public ast_node_t {
+  std::shared_ptr<type_t> type;
+  int storage;
+  enum { INTERN, EXTERN, CONST };
+
+  virtual bool _parse() {
+    return guard([&](){
+      if (expect_key("intern")) storage = INTERN;
+      else if (expect_key("extern")) storage = EXTERN;
+      else if (expect_key("const")) storage = CONST;
+      else return false;
+      return expect(type);
+    }());
+  }
+};
+
+struct decltype_t : public ast_node_t {
+  std::shared_ptr<expr_t> expr;
+
+  virtual bool _parse() {
+    return expect_key("decltype") && expect_punc("(") && expect(expr) && expect_punc(")");
+  }
+};
+
+struct type_t : public ast_node_t {
+  std::shared_ptr<basetype_t> base;
+  std::shared_ptr<spectype_t> spec;
+  std::shared_ptr<decltype_t> decl;
+
+  virtual bool _parse() {
+    return expect(base) || expect(spec) || expect(decl);
   }
 };
 
@@ -1284,13 +1312,16 @@ struct vardecl_t : public ast_node_t {
 };
 
 struct funcdecl_t : public ast_node_t {
+  bool redef;
   std::string name;
   std::vector<std::shared_ptr<vexpr_t>> args;
   std::shared_ptr<compstmt_t> body;
 
   virtual bool _parse() {
     return guard([&](){
-      if (!expect_key("def")) return false;
+      if (expect_key("def")) redef = false;
+      else if (expect_key("redef")) redef = true;
+      else return false;
       if (expect_id(name) && expect_punc("(")) {
         if (expect_punc(")")) return expect(body);
         do {
@@ -1323,12 +1354,12 @@ struct exprstmt_t : public ast_node_t {
 
 struct builtin_t : public ast_node_t {
   int opcode;
-  enum { CONV, MLP, POOL, CONCAT, SPLIT, DEPTHWISE_CONV };
+  enum { CONV, MLP, POOL, DEPTHWISE_CONV };
   std::shared_ptr<arglist_t> args;
 
   virtual bool _parse() {
     return guard(expect_multikeys(opcode, CONV,
-        "EOPConvolution", "EOPFullyConnected", "EOPPooling", "EOPConcat", "EOPSplit", "EOPDepthwiseConv"
+        "EOPConvolution", "EOPFullyConnected", "EOPPooling", "EOPDepthwiseConv"
       ) && expect_punc("(") && expect(args) && expect_punc(")") && expect_punc(";"));
   }
 };
@@ -2012,7 +2043,6 @@ struct symbol_builtin_conv_t : public symbol_stmt_t {
   symbol_val_t::ptr weight;
   symbol_val_t::ptr input;
   symbol_val_t::ptr bias;
-  std::vector<symbol_val_t::ptr> group; // split dest, concat source, group conv kernel.
   int64_t bt;
   int64_t fi;
   int64_t fo;
@@ -2044,15 +2074,6 @@ struct symbol_builtin_pool_t : public symbol_stmt_t {
   int64_t px;
   int64_t py;
   symbol_builtin_pool_t(ast_node_t::ptr ast) : symbol_stmt_t(ast) { }
-};
-
-struct symbol_builtin_concatsplit_t : public symbol_stmt_t {
-  int operation_type;
-  enum { CONCAT, SPLIT };
-  std::vector<symbol_val_t::ptr> group;
-  symbol_val_t::ptr other;
-  int64_t bt;
-  symbol_builtin_concatsplit_t(ast_node_t::ptr ast) : symbol_stmt_t(ast) { }
 };
 
 struct symbol_enscope_t : public symbol_stmt_t {
@@ -2640,15 +2661,15 @@ symbol_t::ptr prob(std::shared_ptr<ast_node_t> ast) {
       return ast->func ? prob(ast->func) : prob(ast->var);
     },
 
-    +[](std::shared_ptr<type_t> ast)->symbol_t::ptr {
+    +[](std::shared_ptr<basetype_t> ast)->symbol_t::ptr {
       switch (ast->type) {
-        case type_t::EXCEPT:
+        case basetype_t::EXCEPT:
           return symbol_handler_type_t::new_(ast);
-        case type_t::INT:
-          return symbol_int_type_t::new_(ast)->intern(ast->storage == type_t::EXTERN ? true : false)->constant(ast->storage == type_t::CONST ? true : false);
-        case type_t::FLOAT:
-          return symbol_float_type_t::new_(ast)->intern(ast->storage == type_t::EXTERN ? true : false)->constant(ast->storage == type_t::CONST ? true : false);
-        case type_t::VECTOR: {
+        case basetype_t::INT:
+          return symbol_int_type_t::new_(ast);
+        case basetype_t::FLOAT:
+          return symbol_float_type_t::new_(ast);
+        case basetype_t::VECTOR: {
           std::vector<int64_t> size;
           for (auto&& s : ast->size) {
             auto ss = prob(s)->to<symbol_val_t>();
@@ -2664,10 +2685,24 @@ symbol_t::ptr prob(std::shared_ptr<ast_node_t> ast) {
               size.push_back(1);
             }
           }
-          return symbol_vec_type_t::new_(ast, size)->intern(ast->storage == type_t::EXTERN ? true : false)->constant(ast->storage == type_t::CONST ? true : false);
+          return symbol_vec_type_t::new_(ast, size);
         }
       }
       return nullptr;
+    },
+
+    +[](std::shared_ptr<spectype_t> ast)->symbol_t::ptr {
+      auto type = prob(ast->type)->to<symbol_type_t>();
+      return type->intern(ast->storage == spectype_t::EXTERN ? true : false)->constant(ast->storage == spectype_t::CONST ? true : false);
+    },
+
+    +[](std::shared_ptr<decltype_t> ast)->symbol_t::ptr {
+      auto expr = prob(ast->expr)->to<symbol_val_t>();
+      return expr->type;
+    },
+
+    +[](std::shared_ptr<type_t> ast)->symbol_t::ptr {
+      return ast->base ? prob(ast->base) : ast->spec ? prob(ast->spec) : prob(ast->decl);
     },
 
     +[](std::shared_ptr<vardecl_t> ast)->symbol_t::ptr {
@@ -2727,6 +2762,9 @@ symbol_t::ptr prob(std::shared_ptr<ast_node_t> ast) {
         }
       } else {
         stmts->list.push_back(std::make_shared<symbol_alloc_t>(ast, var));
+        auto& scope = /*is_in_tr_scope && (type->external || type->const_) ? symbol_registry.back() :*/ symbol_registry.front();
+        scope[name] = var;
+        //if (is_in_tr_scope && !(type->external || type->const_)) symbol_history[name] = var;
         if (init) {
           if (!type->is_scalar()) {
             ast->error() << "initialize of non-scalar variables is not implemented." << ast->eol();
@@ -2737,14 +2775,16 @@ symbol_t::ptr prob(std::shared_ptr<ast_node_t> ast) {
               init->type->note() << "initializer defined from here:" << init->type->eol();
             }
             var->constval = init->constexpr_eval();
+          } else {
+            auto assign = std::make_shared<fake_assign_t>();
+            assign->lhs = std::make_shared<ident_t>();
+            assign->lhs->name = name;
+            stmts->list.push_back(std::make_shared<symbol_eval_t>(ast, symbol_case_assign(assign, init)->to<symbol_val_t>()));
           }
         } else if (type->const_) {
           ast->warn() << "const variable default initialized to zero." << ast->eol();
           var->constval = (int64_t)0;
         }
-        auto& scope = /*is_in_tr_scope && (type->external || type->const_) ? symbol_registry.back() :*/ symbol_registry.front();
-        scope[name] = var;
-        //if (is_in_tr_scope && !(type->external || type->const_)) symbol_history[name] = var;
       }
 
       return stmts;
@@ -2755,7 +2795,7 @@ symbol_t::ptr prob(std::shared_ptr<ast_node_t> ast) {
       std::string name = ast->name;
       for (auto&& v : ast->args)
         args.push_back(v->var->name);
-      if (/*!is_in_tr_scope && */name in symbol_registry.front()) {
+      if (!ast->redef && name in symbol_registry.front()) {
         ast->warn() << "function definition hides previous defined symbol in current scope." << ast->eol();
         symbol_registry.front()[name]->note() << "previous defined from here:" << symbol_registry.front()[name]->eol();
       }/* else if (is_in_tr_scope && scoped_lookup(name) && !(name in symbol_registry.back())) {
