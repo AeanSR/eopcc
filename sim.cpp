@@ -18,8 +18,6 @@
 #include <typeindex>
 #include <cmath>
 
-// #include "data_loader.h"
-
 using namespace std::string_literals;
 
 #define in +in_recieve_set_t()*
@@ -104,8 +102,11 @@ constexpr double spm_leakage = 17.7136 * 1e-3; // mW
 constexpr double spm_read_energy = 0.0561984 * 1e-9; // nJ
 constexpr double spm_write_energy = 0.0555022 * 1e-9; // nJ
 
+constexpr double other_power = 1.5752; // W
+
 constexpr int64_t spm_size = 1024 * 1024;
 constexpr int64_t vq_depth = 8;
+
 // ================================================================ CPULESS CHARACTERISTICS =====
 
 using timestamp_t = double;
@@ -115,6 +116,100 @@ timestamp_t global_time = 0;
 
 //#define log(...) do{std::cout << "[" << global_time << "] " << __VA_ARGS__ << std::endl;}while(0)
 #define log(...)
+
+struct stat_t {
+  double ddr_dyne = .0;
+  double cache_dyne = .0;
+  double spm_dyne = .0;
+  double ddr_stae = .0;
+  double cache_stae = .0;
+  double spm_stae = .0;
+  double other_stae = .0;
+  timestamp_t time_breakdown[2][2][2];
+  timestamp_t total_time;
+  int64_t ddr_traffic = 0;
+  int64_t cache_hit_count = 0;
+  int64_t cache_miss_count = 0;
+  int64_t spm_traffic = 0;
+
+  void stationary(bool ddr_sleep, bool ppu_sleep, bool spu_sleep, timestamp_t start, timestamp_t stop) {
+    ddr_stae += ddr_leakage * (stop - start);
+    cache_stae += cache_leakage * (stop - start);
+    spm_stae += spm_leakage * (stop - start);
+    other_stae += other_power * (stop - start);
+    time_breakdown[!ddr_sleep][!ppu_sleep][!spu_sleep] += stop - start;
+    total_time = stop;
+  }
+  void ddr_read(int64_t size) {
+    ddr_traffic += size;
+    ddr_dyne += ddr_read_energy * ((size + line_bytes - 1) / line_bytes);
+  }
+  void ddr_write(int64_t size) {
+    ddr_traffic += size;
+    ddr_dyne += ddr_write_energy * ((size + line_bytes - 1) / line_bytes);
+  }
+  void cache_hit() {
+    cache_hit_count++;
+    cache_dyne += cache_hit_energy;
+  }
+  void cache_miss() {
+    cache_miss_count++;
+    cache_dyne += cache_miss_energy;
+  }
+  void cache_write() {
+    cache_dyne += cache_write_energy;
+  }
+  void spm_read(int64_t size) {
+    spm_traffic += size;
+    spm_dyne += spm_read_energy * ((size + line_bytes - 1) / line_bytes);
+  }
+  void spm_write(int64_t size) {
+    spm_traffic += size;
+    spm_dyne += spm_write_energy * ((size + line_bytes - 1) / line_bytes);
+  }
+  void report(std::ostream& os) {
+    os << "Energy: " << ddr_dyne + cache_dyne + spm_dyne + ddr_stae + cache_stae + spm_stae + other_stae << std::endl;
+    os << "  |- Offchip energy: " << ddr_dyne + ddr_stae << std::endl;
+    os << "  |    |- DDR Dynamic: " << ddr_dyne << std::endl;
+    os << "  |    -- DDR Static: " << ddr_stae << std::endl;
+    os << "  |- Onchip energy: " << cache_dyne + spm_dyne + cache_stae + spm_stae + other_stae << std::endl;
+    os << "       |- Cache: " << cache_dyne + cache_stae << std::endl;
+    os << "       |    |- Cache Dynamic: " << cache_dyne << std::endl;
+    os << "       |    -- Cache Static: " << cache_stae << std::endl;
+    os << "       |- ScratchPad: " << cache_dyne + cache_stae << std::endl;
+    os << "       |    |- ScratchPad Dynamic: " << spm_dyne << std::endl;
+    os << "       |    -- ScratchPad Static: " << spm_stae << std::endl;
+    os << "       -- Others: " << other_stae << std::endl;
+    os << std::endl;
+    os << "Time: " << total_time << std::endl;
+    timestamp_t time_ddr = .0, time_ppu = .0, time_spu = .0;
+    timestamp_t time_ddr_exclusive = .0, time_compute = .0;
+    for (int d = 0; d < 2; d++) for (int p = 0; p < 2; p++) for (int s = 0; s < 2; s++) {
+      const char * punc[] = { "-", "+" };
+      os << "  " << punc[d] << "DDR," << punc[p] << "PPU," << punc[s] << "SPU: " << time_breakdown[d][p][s] << "(" << (int)(10000 * (time_breakdown[d][p][s] / total_time) + 0.5) / 100. << "%)" << std::endl;
+      if (d) time_ddr += time_breakdown[d][p][s];
+      if (p) time_ppu += time_breakdown[d][p][s];
+      if (s) time_spu += time_breakdown[d][p][s];
+      if (d && !p && !s) time_ddr_exclusive += time_breakdown[d][p][s];
+      if (p || s) time_compute += time_breakdown[d][p][s];
+    }
+    os << "  +DDR: " << time_ddr << "(" << (int)(10000 * (time_ddr / total_time) + 0.5) / 100. << "%)" << std::endl;
+    os << "  +PPU: " << time_ppu << "(" << (int)(10000 * (time_ppu / total_time) + 0.5) / 100. << "%)" << std::endl;
+    os << "  +SPU: " << time_spu << "(" << (int)(10000 * (time_spu / total_time) + 0.5) / 100. << "%)" << std::endl;
+    os << "  +DDR,-PPU,-SPU: " << time_ddr_exclusive << "(" << (int)(10000 * (time_ddr_exclusive / total_time) + 0.5) / 100. << "%)" << std::endl;
+    os << "  +PPU/+SPU: " << time_compute << "(" << (int)(10000 * (time_compute / total_time) + 0.5) / 100. << "%)" << std::endl;
+    os << std::endl;
+    os << "Cache Accesses: " << cache_hit_count + cache_miss_count << std::endl;
+    os << "Cache Hit: " << cache_hit_count << "(" << (int)(10000 * ((double)cache_hit_count / (cache_hit_count + cache_miss_count)) + 0.5) / 100. << "%)" << std::endl;
+    os << "Cache Miss: " << cache_miss_count << "(" << (int)(10000 * ((double)cache_miss_count / (cache_hit_count + cache_miss_count)) + 0.5) / 100. << "%)" << std::endl;
+  }
+
+};
+
+stat_t& stat() {
+  static stat_t _stat;
+  return _stat;
+}
 
 struct coroutine_t {
   int64_t _crbp;
@@ -135,7 +230,7 @@ struct future_t {
   bool finished = false;
   std::vector<coroutine_t*> _ftcb;
 #define await(fut) do{if([&](auto&&_fut){if(!_fut||_fut->finished)return false;_fut->_ftcb.push_back(this);return true;}(fut)){_crbp=__LINE__;return;}case __LINE__:;}while(0)
-#define finish(fut) [&](auto&&_fut){for(auto&&p:_fut->_ftcb)eq.emplace(ellapse(0),p);_fut->finished=true;}(fut)
+#define finish(fut) [&](auto&&_fut){if(!_fut)return;for(auto&&p:_fut->_ftcb)eq.emplace(ellapse(0),p);_fut->finished=true;}(fut)
 #define finish_at(fut,ts) do{future_scheduler().schedule(ts,fut);}while(0)
   using ptr = std::shared_ptr<future_t>;
   static ptr new_() { return std::make_shared<future_t>(); }
@@ -323,9 +418,11 @@ struct mem_io_t : public io_t {
   virtual bool duplex() const { return false; }
   virtual abstract_mem_t* mem() { return &data_array; }
   virtual timestamp_t get_exec(get_request_t req) {
+    stat().ddr_read(req.size);
     return ((req.size + line_bytes - 1) / line_bytes) * line_bytes / ddr_bandwidth;
   }
   virtual timestamp_t set_exec(set_request_t req) {
+    stat().ddr_write(req.size);
     return ((req.size + line_bytes - 1) / line_bytes) * line_bytes / ddr_bandwidth;
   }
   virtual timestamp_t read_latency() const { return ddr_read_latency; }
@@ -342,9 +439,11 @@ struct spm_io_t : public io_t {
   virtual bool duplex() const { return true; }
   virtual abstract_mem_t* mem() { return &data_array; }
   virtual timestamp_t get_exec(get_request_t req) {
+    stat().spm_read(req.size);
     return (req.size + line_bytes - 1) / line_bytes / frequency / 2.;
   }
   virtual timestamp_t set_exec(set_request_t req) {
+    stat().spm_write(req.size);
     return (req.size + line_bytes - 1) / line_bytes / frequency;
   }
   virtual timestamp_t read_latency() const { return spm_read_latency; }
@@ -416,6 +515,7 @@ struct cache_t : public coroutine_t {
 
       hit = lookup(req.addr);
       yield(ellapse(hit ? cache_hit_latency : cache_miss_latency));
+      if (hit) stat().cache_hit(); else stat().cache_miss();
 
       if (req.mode == 0) { // read
         if (!hit) { // miss, must read from ddr.
@@ -428,6 +528,7 @@ struct cache_t : public coroutine_t {
           yield(ellapse(cache_write_latency));
         }
       } else { // write
+        stat().cache_write();
         finish(req.fut); // execution dont need to wait cache writing.
         if (!hit || *req.data != data_array.ref(req.addr)) {
           ddr().set(req.addr, req.data); // no await, write cache and ddr simutaneously.
@@ -1015,6 +1116,7 @@ struct controller_t : public coroutine_t {
     lbtry: { if (pc >= mq.size()) halted = true; else {
       log("fetch inst from pc = " << pc);
       i = mq[pc++];
+      //std::cout << "[" << global_time << "] " << "pc: " << pc - 1 << ", inst: " << i.op << "." << std::endl;
       tests.clear();
       gr().ref(0) = dcell = lcell = rcell = cell_t();
       for (auto p = i.args.begin(); p != i.args.end(); p++) {
@@ -1279,142 +1381,24 @@ void readraw(std::vector<inst_t>& main_inst, std::vector<inst_t>& except_inst, c
     }
   }
 }
-/*
-bool is_number_in_readraw(char s[]) {
-  // [0-9][0-9]*
-  for (int i = 0; i < strlen(s); i++)
-    if ((s[i] > '9' or s[i] < '0') and s[i] != '-' and s[i] != '+')
-      return false;
-  return true;
-}
-
-int readraw(std::vector<inst_t> &main_inst, std::vector<inst_t> &except_inst, const char filename[]) {
-  #define str2int64(t_) strtol(t_, NULL, 10)
-  FILE *fpin;
-  if ((fpin=fopen(filename,"r")) == NULL) {
-    std::cout << "[ERROR] No input src " << filename << std::endl;
-    exit(-1);
-  }
-  char input_str[1024];
-  int pc;
-  std::string op;
-  std::vector<inst_t> *now = &main_inst;
-
-  while(fscanf(fpin, "%s", input_str) != EOF) {
-    if (strcmp(input_str, "main:") == 0) {
-      //std::cout << "main inst" << std::endl;
-      continue;
-    }
-    if (strcmp(input_str, "except:") == 0) {
-      //std::cout << "except inst" << std::endl;
-      now = &except_inst;
-      continue;
-    }
-    if (is_number_in_readraw(input_str)) {
-      // PC
-      int64_t pc = str2int64(input_str);
-      std::string op;
-      std::vector<param_t::ptr> args;
-      (*now).push_back(inst_t(pc, op, args));
-    } else if (input_str[0] == 'p' and input_str[1] == 't') {
-      // ptr/#XXX or ptr/rXXX
-      if (strlen(input_str) <= 5)
-        std::cout << "ERROR in" << __LINE__ << input_str <<std::endl;
-      char tmp_[1024];
-      strcpy(tmp_, input_str + 5);
-      int64_t num_ = str2int64(tmp_);
-      if (input_str[4] == '#') {
-        iimm_t t_; std::shared_ptr<iaddr_t> addr_ = std::make_shared<iaddr_t>();
-        t_.imm = num_; addr_->imm = t_;
-        (*now).back().args.push_back(addr_);
-      } else {
-        reg_t t_; std::shared_ptr<raddr_t> addr_ = std::make_shared<raddr_t>();
-        t_.regid = num_; addr_->reg = t_;
-        (*now).back().args.push_back(addr_);
-      }
-    } else if (input_str[0] == '#' or input_str[0] == 'r' or input_str[0] == '!') {
-      // #XXX or rXXX or !XXX
-      char tmp_[1024];
-      strcpy(tmp_, input_str + 1);
-      if (input_str[0] == 'r') {
-        int64_t num_ = str2int64(tmp_);
-        std::shared_ptr<reg_t> t_ = std::make_shared<reg_t>();
-        t_->regid = num_;
-        (*now).back().args.push_back(t_);
-      } else {
-        if ((*now).back().op != std::string("movfs")) {
-          int64_t num_ = str2int64(tmp_);
-          std::shared_ptr<iimm_t> t_ = std::make_shared<iimm_t>();
-          t_->imm = num_;
-          (*now).back().args.push_back(t_);
-        } else {
-          double num_  = atof(tmp_);
-          std::shared_ptr<fimm_t> t_ = std::make_shared<fimm_t>();
-          t_->imm = num_;
-          (*now).back().args.push_back(t_);
-        }
-      }
-    } else if (str2int64(input_str) > 0) {
-      int i = 0;
-      for (i = 0; i < strlen(input_str); i++) {
-        if (input_str[i] <= '9' and input_str[i] >= '0')
-            continue;
-        if (input_str[i] == 's')
-            break;
-      }
-      std::shared_ptr<output_t> output_ = std::make_shared<output_t>();
-      output_->content = std::string(input_str + i + 1);
-      // std::cout << output_->content << std::endl;
-      (*now).back().args.push_back(output_);
-    } else {
-      (*now).back().op = std::string(input_str);
-    }
-  }
-  return 0;
-}
-
-int visualizing_in_checkinput(const std::vector<inst_t> inst) {
-  for (size_t i = 0; i < inst.size(); i++) {
-    printf("  %d ", inst[i].pc);
-    std::cout << inst[i].op;
-    for (size_t j = 0; j < inst[i].args.size(); j++) {
-       std::cout << " ";
-       inst[i].args[j]->visualizing();
-    }
-    std::cout << std::endl;
-  }
-  return 0;
-}
-
-int checkinput(const std::vector<inst_t> main_inst, const std::vector<inst_t> except_inst) {
-  printf("main:\n");
-  visualizing_in_checkinput(main_inst);
-  printf("except:\n");
-  visualizing_in_checkinput(except_inst);
-  return 0;
-}*/
 
 int main(int argc, char** argv) {
   controller_t controller;
   readraw(controller.mq, controller.exq, (argc > 1 ? argv[1] : "eop.out"));
   controller.exq.insert(controller.exq.begin(), controller.mq.begin(), controller.mq.end());
-  //checkinput(controller.mq, controller.exq);
   for (auto&& p : coroutine_t::list())
     p->operator()();
   while(!eq.empty()) {
     auto e = eq.top(); eq.pop();
     if (global_time <= e.time) {
+      stat().stationary(ddr().sleep, ppu().sleep, spu().sleep, global_time, e.time);
       global_time = e.time;
       e.callback->operator()();
     }
   }
   std::cout << "[" << global_time << "] " << "processor halted: " << controller.halted << "." << std::endl;
-/*
-  std::vector<inst_t> main_inst;
-  std::vector<inst_t> except_inst;
-  readraw(main_inst, except_inst, std::string("eop.out").c_str());
-  printf("%d %d\n", main_inst.size(), except_inst.size());
-  checkinput(main_inst, except_inst);
-*/
+  stat().report(std::cout);
+  std::ofstream of(argc > 2 ? argv[2] : "eopsim.report");
+  stat().report(of);
   return 0;
 }
