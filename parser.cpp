@@ -4506,6 +4506,7 @@ void exec(symbol_stmt_t::ptr stmt) {
             fi_num = fi%sp_fi ? fi/sp_fi+1 : fi/sp_fi;
             total_size = 2*32*ky*kx*sp_fi + 2*ky*xi*sp_fi + 4*xo*32;
             if(2*total_size <= 1048576)  break;
+            sp_fi = sp_fi - 32;
           }
         }
         else if(fo < 32 && 2*fo*ky*kx*32 + 2*ky*xi*32 + 4*xo*fo <= 1048576/2) {
@@ -4521,6 +4522,7 @@ void exec(symbol_stmt_t::ptr stmt) {
             fi_num = fi%sp_fi ? fi/sp_fi+1 : fi/sp_fi;
             total_size = 2*fo*ky*kx*sp_fi + 2*ky*xi*sp_fi + 4*xo*fo;
             if(2*total_size <= 1048576)  break;
+            sp_fi = sp_fi - 32;
           }
         }
         else {
