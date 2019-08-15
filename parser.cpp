@@ -581,6 +581,8 @@ bool expect(std::shared_ptr<T>& get) {
       while (guard(punc && expect(first))) {                                        \
         auto trailing = std::make_shared<typename decltype(lhs->major_type)::element_type>(*this); \
         trailing->set_cursor();                                                     \
+        trailing->type = type_;                                                     \
+        type_ = type;                                                               \
         lhs = std::make_shared<typename decltype(lhs)::element_type>();             \
         lhs->set_cursor();                                                          \
         lhs->major_type = trailing;                                                 \
@@ -1129,8 +1131,9 @@ struct expr_t : public ast_node_t {
 struct arglist_t : public ast_node_t {
   std::shared_ptr<expr_t> lhs;
   std::shared_ptr<assignexpr_t> rhs;
+  int type; // dummy
+
   virtual bool _parse() {
-    int type;
     return left_aggregate(arglist, assign, expect_punc(","));
   }
 };
@@ -1621,8 +1624,8 @@ struct symbol_array_type_t : public symbol_type_t {
     return ss.str();
   }
   virtual bool is_spm() const { return elem_type->is_spm(); };
-  virtual ptr intern(bool ex=false) const { return nullptr; }
-  virtual ptr constant(bool co=false) const { return nullptr; }
+  virtual ptr intern(bool ex=false) const { auto ret = std::make_shared<symbol_array_type_t>(elem_type, size); ret->external = ex; return ret; }
+  virtual ptr constant(bool co=false) const { auto ret = std::make_shared<symbol_array_type_t>(elem_type, size); ret->const_ = co; return ret; }
 };
 
 struct symbol_null_t : public symbol_val_t {
@@ -2221,7 +2224,8 @@ void rewind_function_instantiation_stack() {
 }
 
 symbol_t::ptr prob(std::shared_ptr<ast_node_t> ast) {
-  verbose( 3, null_ast()->note() << "prob symbol tree of " << (ast ? typeid(*ast).name() : "nullptr") << (ast ? ast : null_ast())->eol() );
+  verbose( 2, std::cout << "prob." << std::endl; );
+  verbose( 3, (ast ? ast : null_ast())->note() << "prob symbol tree of " << (ast ? typeid(*ast).name() : "nullptr") << (ast ? ast : null_ast())->eol() );
   if (!ast) return std::make_shared<symbol_error_t>(null_ast());
   return typeswitch(ast, 
 
@@ -2282,6 +2286,10 @@ symbol_t::ptr prob(std::shared_ptr<ast_node_t> ast) {
     +[](std::shared_ptr<descexpr_t> ast)->symbol_t::ptr {
       auto lhs = prob(ast->lhs)->to<symbol_val_t>();
       auto desc = prob(ast->desc)->to<symbol_val_t>();
+      verbose( 2, ast->lhs->note() << "lhs = " << lhs << ast->lhs->eol());
+      verbose( 2, ast->lhs->note() << "lhs type: " << typeid(*lhs).name() << ast->lhs->eol());
+      verbose( 2, ast->lhs->note() << "lhs type: " << lhs->type << ast->lhs->eol());
+      verbose( 2, ast->lhs->note() << "lhs type: " << lhs->type->name() << ast->lhs->eol());
       auto rvck = [&](symbol_val_t::ptr opr) {
         if (opr->rvvalue()) {
           ast->error() << "expression do not accept rv-value. convert to lvalue by assignment first." << ast->eol();
@@ -2289,14 +2297,23 @@ symbol_t::ptr prob(std::shared_ptr<ast_node_t> ast) {
         } return 0;
       };
       rvck(lhs);
+      verbose( 2, __LINE__);
       if (lhs->type->degrade() is typeid(symbol_void_type_t)) {
+      verbose( 2, __LINE__);
         ast->error() << "operand of type " << lhs->type->name() << " is not subscriptable." << ast->eol();
+      verbose( 2, __LINE__);
         lhs->type->note() << "type defined from here:" << lhs->type->eol();
+      verbose( 2, __LINE__);
       }
+      verbose( 2, __LINE__);
       if (!(desc->type is typeid(symbol_int_type_t))) {
+      verbose( 2, __LINE__);
         ast->error() << "subscript must be an int, got " << desc->type->name() << "." << ast->eol();
+      verbose( 2, __LINE__);
         desc->type->note() << "type defined from here:" << desc->type->eol();
+      verbose( 2, __LINE__);
       }
+      verbose( 2, __LINE__);
       return std::make_shared<symbol_descript_t>(ast, lhs, desc);
     },
 
@@ -2340,6 +2357,7 @@ symbol_t::ptr prob(std::shared_ptr<ast_node_t> ast) {
             param = std::make_shared<symbol_var_t>(ast, param->type, func->args[i]);
             stmts->list.push_back(std::make_shared<symbol_alloc_t>(ast, param->to<symbol_var_t>()));
             auto assign = std::make_shared<fake_assign_t>();
+            assign->lineno = ast->lineno; assign->charno = ast->charno;
             assign->lhs = std::make_shared<ident_t>();
             assign->lhs->name = func->args[i];
             symbol_registry.emplace_front(); // cheat the assign case.
@@ -2777,6 +2795,7 @@ symbol_t::ptr prob(std::shared_ptr<ast_node_t> ast) {
             var->constval = init->constexpr_eval();
           } else {
             auto assign = std::make_shared<fake_assign_t>();
+            assign->lineno = ast->lineno; assign->charno = ast->charno;
             assign->lhs = std::make_shared<ident_t>();
             assign->lhs->name = name;
             stmts->list.push_back(std::make_shared<symbol_eval_t>(ast, symbol_case_assign(assign, init)->to<symbol_val_t>()));
@@ -3874,9 +3893,10 @@ genval_t eval(symbol_val_t::ptr val) {
         auto rhs = eval(val->subscript);
         if (std::holds_alternative<addr_t::ptr>(rhs)) {
           pinst("loads", reg_t::alloc(val), std::get<addr_t::ptr>(rhs)->opr(val));
-          pinst("muli", reg_t::alloc(val), reg_t::alloc(val), val->type->sizeof_());
           rhs = reg_t::alloc(val);
         }
+        pinst("muli", reg_t::alloc(val), std::get<reg_t>(rhs), val->type->sizeof_());
+        rhs = reg_t::alloc(val);
         *lhs = *lhs + std::get<reg_t>(rhs);
       }
       return lhs;
