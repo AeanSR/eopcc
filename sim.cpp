@@ -107,6 +107,10 @@ constexpr double other_power = 1.5752; // W
 constexpr int64_t spm_size = 1024 * 1024;
 constexpr int64_t vq_depth = 8;
 
+  // simulating CPU-SIMD manner with an exponential distributed interrupt.
+constexpr bool random_interrupt = false;
+constexpr double interrupt_frequency = 260.36448901889776;
+
 // ================================================================ CPULESS CHARACTERISTICS =====
 
 using timestamp_t = double;
@@ -133,6 +137,8 @@ struct stat_t {
   int64_t spm_traffic = 0;
   int64_t udet_mem = 0;
   int64_t udet_jmp = 0;
+  int64_t ppu_invoke_count = 0;
+  double ppu_restart_count = 0;
 
   void stationary(bool ddr_sleep, bool ppu_sleep, bool spu_sleep, timestamp_t start, timestamp_t stop) {
     ddr_stae += ddr_leakage * (stop - start);
@@ -160,6 +166,10 @@ struct stat_t {
   }
   void cache_write() {
     cache_dyne += cache_write_energy;
+  }
+  void ppu_call(double restart) {
+    ppu_invoke_count ++;
+    ppu_restart_count += restart;
   }
   void spm_read(int64_t size) {
     spm_traffic += size;
@@ -204,6 +214,9 @@ struct stat_t {
     os << "Cache Accesses: " << cache_hit_count + cache_miss_count << std::endl;
     os << "Cache Hit: " << cache_hit_count << "(" << (int)(10000 * ((double)cache_hit_count / (cache_hit_count + cache_miss_count)) + 0.5) / 100. << "%)" << std::endl;
     os << "Cache Miss: " << cache_miss_count << "(" << (int)(10000 * ((double)cache_miss_count / (cache_hit_count + cache_miss_count)) + 0.5) / 100. << "%)" << std::endl;
+    os << "PPU Invoke: " << ppu_invoke_count << std::endl;
+    os << "PPU Restart: " << ppu_restart_count << std::endl;
+    os << "PPU CPI: " << (int)((time_ppu * frequency / ppu_invoke_count) * 10000) / 100. << std::endl;
     os << "DDR Traffic: " << ddr_traffic << std::endl;
     os << "SPM Traffic: " << spm_traffic << std::endl;
     os << std::endl;
@@ -893,7 +906,7 @@ struct ppu_t : public coroutine_t {
   };
   enum { NONE, UNARY, BINARY, REDUCE, POOL, CONV, MM, MOVSV };
   int mode = NONE;
-  int64_t cycles = 0;
+  int64_t cycles = 0; timestamp_t exec_time;
   int64_t total_cycles = 0;
   std::list<ppu_request_t> reqs;
   std::list<future_t::ptr> hs;
@@ -971,8 +984,22 @@ struct ppu_t : public coroutine_t {
             hs.push_back(spm(0).set(0, cycles * line_bytes));
         }
         // pipeline 2: ex
+        exec_time = cycles / frequency;
+        if (random_interrupt) {
+          // R. Sheahan et. al., "On the completion time distribution for tasks that must restart from the beginning if a failure occurs"
+          // https://doi.org/10.1145/1215956.1215967
+          // Theorem 1:
+          double gt = 1. - exp(-interrupt_frequency * exec_time);
+          double gt_bar = 1. - gt;
+          double ex_nt = gt / gt_bar;
+          // Eq (3):
+          double ex_ut = 1. / interrupt_frequency;
+          double ex_xt = exec_time + ex_nt * ex_ut;
+          exec_time = ex_xt;
+          stat().ppu_call(ex_nt);
+        } else stat().ppu_call(0);
         hs.push_back(future_t::new_());
-        finish_at(hs.back(), ellapse(cycles / frequency));
+        finish_at(hs.back(), ellapse(exec_time));
         // pipeline 1: ld
         if (mode == NONE) {
         } else if (mode in std::set<int>{UNARY, REDUCE}) {
