@@ -2087,6 +2087,10 @@ struct symbol_descope_t : public symbol_stmt_t {
   symbol_descope_t(ast_node_t::ptr ast) : symbol_stmt_t(ast) { }
 };
 
+struct symbol_nop_t : public symbol_stmt_t {
+  symbol_nop_t(ast_node_t::ptr ast) : symbol_stmt_t(ast) { }
+};
+
 std::list<std::unordered_map<std::string, symbol_t::ptr>> symbol_registry;
 std::unordered_map<std::string, symbol_t::ptr> symbol_history;
 #define scoped_lookup(name) [&]()->symbol_t::ptr{ for (auto&& scope : symbol_registry) if (name in scope) return scope[name]; return nullptr; }()
@@ -2847,6 +2851,7 @@ symbol_t::ptr prob(std::shared_ptr<ast_node_t> ast) {
     },
 
     +[](std::shared_ptr<exprstmt_t> ast)->symbol_t::ptr {
+      if (!ast->expr) return std::make_shared<symbol_nop_t>(ast);
       auto val = prob(ast->expr)->to<symbol_val_t>();
       auto rvck = [&](symbol_val_t::ptr opr) {
         if (opr->rvvalue()) {
@@ -4163,6 +4168,8 @@ void exec(symbol_stmt_t::ptr stmt) {
   if (!stmt) return;
   typeswitch(stmt,
 
+    +[](std::shared_ptr<symbol_nop_t> stmt) {
+    },
     +[](std::shared_ptr<symbol_enscope_t> stmt) {
       active.emplace_front();
     },
