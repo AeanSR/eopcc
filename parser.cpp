@@ -1803,7 +1803,7 @@ struct symbol_unary_t : public symbol_val_t {
     auto orig = symbol_cast_t(null_ast(), oprand, op_cast(oprand->type, opcode)).constexpr_eval();
     if (orig.index() == 1) switch(opcode) {
       case REV: return ~std::get<int64_t>(orig);
-      case NOT: return ~std::get<int64_t>(orig);
+      case NOT: return (int64_t)!std::get<int64_t>(orig);
       case POS: return +std::get<int64_t>(orig);
       case NEG: return -std::get<int64_t>(orig);
     }

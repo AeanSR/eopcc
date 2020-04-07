@@ -111,6 +111,9 @@ constexpr int64_t vq_depth = 8;
 constexpr bool random_interrupt = false;
 constexpr double interrupt_frequency = 260.36448901889776;
 
+  // simulating SoC with an additional switching latency
+constexpr double switch_penalty = (15e-9, 0);
+
 // ================================================================ CPULESS CHARACTERISTICS =====
 
 using timestamp_t = double;
@@ -235,6 +238,7 @@ struct coroutine_t {
   int64_t _crbp;
   bool sleep;
 #define yield(ts) do{_crbp=__LINE__;eq.emplace(ts,this);return;case __LINE__:;}while(0)
+#define yield2(ts) do{_crbp=(__LINE__ + 1048576);eq.emplace(ts,this);return;case (__LINE__ + 1048576):;}while(0)
 #define awake do{if(sleep){sleep=false;eq.emplace(ellapse(0),this);}}while(0)
 #define hibernate do{_crbp=__LINE__;sleep=true;return;case __LINE__:;}while(0)
 #define async(...) void operator()(){sleep=false;switch(_crbp){case 0: default:{__VA_ARGS__}}}
@@ -1189,7 +1193,9 @@ struct controller_t : public coroutine_t {
   future_t::ptr h;
   cell_t ock, ck;
 
-#define try_issue_to(comp) do { if (!std::all_of(tests.begin(), tests.end(), [](auto&& p){ return p.test(); })) lbthrow(0); if (vq().full()) lbthrow(0); h = vq().issue(i); for (auto&& t : tests) t.lock(h); yield(ellapse(1. / frequency)); } while(0)
+  bool require_switch = true;
+#define soc_switch do { if (switch_penalty > 0 && require_switch) yield2(ellapse(switch_penalty)); require_switch = false; } while(0)
+#define try_issue_to(comp) do { if (!std::all_of(tests.begin(), tests.end(), [](auto&& p){ return p.test(); })) lbthrow(0); if (vq().full()) lbthrow(0); soc_switch; h = vq().issue(i); for (auto&& t : tests) t.lock(h); yield(ellapse(1. / frequency)); } while(0)
 #define lbthrow(t) do { tno = (t); goto lbcatch; } while(0)
 
   async(while(!halted){
@@ -1306,6 +1312,7 @@ struct controller_t : public coroutine_t {
         tests.emplace_back(false, i.args[0]->eval(), i.args[0]->eval() + size);
         try_issue_to(vq);
       } else {
+	require_switch = true;
         if (i.op in cc("nop"s)) {
         } else if (i.op in cc("halt"s)) {
           halted = true;
