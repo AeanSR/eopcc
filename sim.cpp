@@ -71,6 +71,7 @@ is_recieve_ptr_t operator%(const std::type_info& lhs, is_recieve_ptr_t rhs)
 
 constexpr double frequency = 1e9; // hertz
 constexpr int64_t line_bytes = 64; // bytes
+//constexpr int64_t line_bytes = 512; // bytes
 
   // -- DDR ----
   // 45nm, 32GB DRAM, 64 Bytes/Line
@@ -101,8 +102,20 @@ constexpr double spm_write_latency = 0.831102 * 1e-9; // ns
 constexpr double spm_leakage = 17.7136 * 1e-3; // mW
 constexpr double spm_read_energy = 0.0561984 * 1e-9; // nJ
 constexpr double spm_write_energy = 0.0555022 * 1e-9; // nJ
+//  // 45nm, 1MB SRAM, 512 Bytes/Line, 4.383mm2
+//constexpr double spm_read_latency = 0.468601 * 1e-9; // ns
+//constexpr double spm_write_latency = 0.321733 * 1e-9; // ns
+//constexpr double spm_leakage = 8.920 * 1e-3; // mW
+//constexpr double spm_read_energy = 1.858 * 1e-9; // nJ
+//constexpr double spm_write_energy = 1.852 * 1e-9; // nJ
+//  // 45nm, 4MB SRAM, 512 Bytes/Line, 22.085mm2
+//constexpr double spm_read_latency = 0.866541 * 1e-9; // ns
+//constexpr double spm_write_latency = 0.866541 * 1e-9; // ns
+//constexpr double spm_leakage = 36.211 * 1e-3; // mW
+//constexpr double spm_read_energy = 1.299 * 1e-9; // nJ
+//constexpr double spm_write_energy = 1.293 * 1e-9; // nJ
 
-constexpr double other_power = 1.5752; // W
+constexpr double other_power = 1.5752 + 0*60968.88*1e-3; // W
 
 constexpr int64_t spm_size = 1024 * 1024;
 constexpr int64_t vq_depth = 8;
@@ -936,7 +949,7 @@ struct ppu_t : public coroutine_t {
         } else if (reqs.front().op in cc("haddv"s, "hmulv"s, "hminv"s, "hmaxv"s)) {
           mode = REDUCE;
           cycles = total_cycles = (reqs.front().size.back() + line_bytes - 1) / line_bytes;
-        } else if (reqs.front().op in cc("pool"s)) {
+        } else if (reqs.front().op in cc("pool"s, "unpool"s)) {
           mode = POOL;
           int64_t fi = (reqs.front().size[2] * 2 + line_bytes - 1) / line_bytes;
           int64_t kx = reqs.front().size[3];
@@ -951,7 +964,7 @@ struct ppu_t : public coroutine_t {
           int64_t xo = (xi - kx + px * 2 + sx) / sx;
           int64_t yo = (yi - ky + py * 2 + sy) / sy;
           cycles = total_cycles = bt * xo * yo * fi * kx * ky;
-        } else if (reqs.front().op in cc("conv"s)) {
+        } else if (reqs.front().op in cc("conv"s, "deconv"s, "reconv"s)) {
           mode = CONV;
           int64_t fi = (reqs.front().size[3] * 2 + line_bytes - 1) / line_bytes;
           int64_t fo = (reqs.front().size[4] * 2 + line_bytes - 1) / line_bytes;
@@ -1230,7 +1243,7 @@ struct controller_t : public coroutine_t {
             if (!rob().test_read(reg_t(regid))) lbthrow(0);
             if (!gr().ref(regid).det) {
               stat().udet_mem++;
-              gr().ref(regid).data.i = 1048576;
+              gr().ref(regid).data.i = spm_size;
             }
             *p = std::make_shared<iimm_t>(gr().ref(regid).data.i);
             log("arg " << std::distance(i.args.begin(), p) << " raddr regid = " << regid
@@ -1278,6 +1291,14 @@ struct controller_t : public coroutine_t {
         tests.emplace_back(false, i.args[0]->eval(), i.args[0]->eval() + size2 * 2);
         tests.emplace_back(true, i.args[1]->eval(), i.args[1]->eval() + size * 2);
         try_issue_to(vq);
+      } else if (i.op in cc("unpool"s)) {
+        size = i.args[2]->eval() * i.args[7]->eval() * i.args[8]->eval() * i.args[9]->eval();
+        xo = (i.args[7]->eval() - i.args[3]->eval() + i.args[10]->eval() * 2 + i.args[5]->eval()) / i.args[5]->eval();
+        yo = (i.args[8]->eval() - i.args[4]->eval() + i.args[11]->eval() * 2 + i.args[6]->eval()) / i.args[6]->eval();
+        size2 = i.args[2]->eval() * xo * yo * i.args[9]->eval();
+        tests.emplace_back(false, i.args[0]->eval(), i.args[0]->eval() + size * 2);
+        tests.emplace_back(true, i.args[1]->eval(), i.args[1]->eval() + size2 * 2);
+        try_issue_to(vq);
       } else if (i.op in cc("conv"s)) {
         size = i.args[3]->eval() * i.args[7]->eval() * i.args[8]->eval() * i.args[9]->eval();
         xo = (i.args[7]->eval() - i.args[5]->eval() + i.args[12]->eval() * 2 + i.args[10]->eval()) / i.args[10]->eval();
@@ -1286,6 +1307,26 @@ struct controller_t : public coroutine_t {
         size3 = i.args[4]->eval() * i.args[5]->eval() * i.args[6]->eval() * i.args[3]->eval();
         tests.emplace_back(false, i.args[0]->eval(), i.args[0]->eval() + size2 * 2);
         tests.emplace_back(true, i.args[1]->eval(), i.args[1]->eval() + size3 * 2);
+        tests.emplace_back(true, i.args[2]->eval(), i.args[2]->eval() + size * 2);
+        try_issue_to(vq);
+      } else if (i.op in cc("deconv"s)) {
+        size = i.args[3]->eval() * i.args[7]->eval() * i.args[8]->eval() * i.args[9]->eval();
+        xo = (i.args[7]->eval() - i.args[5]->eval() + i.args[12]->eval() * 2 + i.args[10]->eval()) / i.args[10]->eval();
+        yo = (i.args[8]->eval() - i.args[6]->eval() + i.args[13]->eval() * 2 + i.args[11]->eval()) / i.args[11]->eval();
+        size2 = i.args[4]->eval() * xo * yo * i.args[9]->eval();
+        size3 = i.args[4]->eval() * i.args[5]->eval() * i.args[6]->eval() * i.args[3]->eval();
+        tests.emplace_back(false, i.args[0]->eval(), i.args[0]->eval() + size * 2);
+        tests.emplace_back(true, i.args[1]->eval(), i.args[1]->eval() + size3 * 2);
+        tests.emplace_back(true, i.args[2]->eval(), i.args[2]->eval() + size2 * 2);
+        try_issue_to(vq);
+      } else if (i.op in cc("reconv"s)) {
+        size = i.args[3]->eval() * i.args[7]->eval() * i.args[8]->eval() * i.args[9]->eval();
+        xo = (i.args[7]->eval() - i.args[5]->eval() + i.args[12]->eval() * 2 + i.args[10]->eval()) / i.args[10]->eval();
+        yo = (i.args[8]->eval() - i.args[6]->eval() + i.args[13]->eval() * 2 + i.args[11]->eval()) / i.args[11]->eval();
+        size2 = i.args[4]->eval() * xo * yo * i.args[9]->eval();
+        size3 = i.args[4]->eval() * i.args[5]->eval() * i.args[6]->eval() * i.args[3]->eval();
+        tests.emplace_back(false, i.args[0]->eval(), i.args[0]->eval() + size3 * 2);
+        tests.emplace_back(true, i.args[1]->eval(), i.args[1]->eval() + size2 * 2);
         tests.emplace_back(true, i.args[2]->eval(), i.args[2]->eval() + size * 2);
         try_issue_to(vq);
       } else if (i.op in cc("mm"s)) {

@@ -1,3 +1,6 @@
+#define PPU_SIZE (32)
+#define SPM_SIZE (1048576)
+
 #include <iostream>
 #include <fstream>
 #include <sstream>
@@ -37,7 +40,7 @@ std::set<std::string> keywords = {
   "if", "else", "for", "do", "while", "continue", "break", "return", "print",
   "sizeof", "typeof", "decltype",
   "def", "redef", "async", "await", "except",
-  "conv", "pool", "mm", "act", "trans", "cycleadd", "floor", "strideio",
+  "conv", "deconv", "reconv", "pool", "unpool", "mm", "act", "trans", "cycleadd", "floor", "strideio",
   "int", "float", "vector", "extern", "intern", "const", "null",
   "EOPConvolution", "EOPFullyConnected", "EOPPooling", "EOPDepthwiseConv"
 };
@@ -1142,11 +1145,11 @@ struct arglist_t : public ast_node_t {
 
 struct intrinstmt_t : public ast_node_t {
   int opcode;
-  enum { CONV, POOL, MM, ACT, TRANS, CYCLEADD, FLOOR, STRIDEIO };
+  enum { CONV, POOL, MM, ACT, TRANS, CYCLEADD, FLOOR, STRIDEIO, DECONV, RECONV, UNPOOL };
   std::shared_ptr<arglist_t> args;
 
   virtual bool _parse() {
-    return guard(expect_multikeys(opcode, CONV, "conv", "pool", "mm", "act", "trans", "cycleadd", "floor", "strideio") && expect(args) && expect_punc(";"));
+    return guard(expect_multikeys(opcode, CONV, "conv", "pool", "mm", "act", "trans", "cycleadd", "floor", "strideio", "deconv", "reconv", "unpool") && expect(args) && expect_punc(";"));
   }
 };
 
@@ -1983,6 +1986,28 @@ struct symbol_conv_t : public symbol_stmt_t {
   symbol_conv_t(ast_node_t::ptr ast, symbol_val_t::ptr result, symbol_val_t::ptr weight, symbol_val_t::ptr input, int64_t stride_x = 1, int64_t stride_y = 1, int64_t pad_x = 0, int64_t pad_y = 0)
       : symbol_stmt_t(ast), result(result), weight(weight), input(input), stride_x(stride_x), stride_y(stride_y), pad_x(pad_x), pad_y(pad_y) { }
 };
+struct symbol_deconv_t : public symbol_stmt_t {
+  symbol_val_t::ptr input;
+  symbol_val_t::ptr weight;
+  symbol_val_t::ptr result;
+  int64_t stride_x;
+  int64_t stride_y;
+  int64_t pad_x;
+  int64_t pad_y;
+  symbol_deconv_t(ast_node_t::ptr ast, symbol_val_t::ptr input, symbol_val_t::ptr weight, symbol_val_t::ptr result, int64_t stride_x = 1, int64_t stride_y = 1, int64_t pad_x = 0, int64_t pad_y = 0)
+      : symbol_stmt_t(ast), input(input), weight(weight), result(result), stride_x(stride_x), stride_y(stride_y), pad_x(pad_x), pad_y(pad_y) { }
+};
+struct symbol_reconv_t : public symbol_stmt_t {
+  symbol_val_t::ptr weight;
+  symbol_val_t::ptr result;
+  symbol_val_t::ptr input;
+  int64_t stride_x;
+  int64_t stride_y;
+  int64_t pad_x;
+  int64_t pad_y;
+  symbol_reconv_t(ast_node_t::ptr ast, symbol_val_t::ptr weight, symbol_val_t::ptr result, symbol_val_t::ptr input, int64_t stride_x = 1, int64_t stride_y = 1, int64_t pad_x = 0, int64_t pad_y = 0)
+      : symbol_stmt_t(ast), weight(weight), result(result), input(input), stride_x(stride_x), stride_y(stride_y), pad_x(pad_x), pad_y(pad_y) { }
+};
 
 struct symbol_pool_t : public symbol_stmt_t {
   symbol_val_t::ptr result;
@@ -1995,6 +2020,18 @@ struct symbol_pool_t : public symbol_stmt_t {
   int64_t pad_y;
   symbol_pool_t(ast_node_t::ptr ast, symbol_val_t::ptr result, symbol_val_t::ptr input, int64_t kernel_x, int64_t kernel_y, int64_t stride_x, int64_t stride_y, int64_t pad_x = 0, int64_t pad_y = 0)
       : symbol_stmt_t(ast), result(result), input(input), kernel_x(kernel_x), kernel_y(kernel_y), stride_x(stride_x), stride_y(stride_y), pad_x(pad_x), pad_y(pad_y) { }
+};
+struct symbol_unpool_t : public symbol_stmt_t {
+  symbol_val_t::ptr input;
+  symbol_val_t::ptr result;
+  int64_t kernel_x;
+  int64_t kernel_y;
+  int64_t stride_x;
+  int64_t stride_y;
+  int64_t pad_x;
+  int64_t pad_y;
+  symbol_unpool_t(ast_node_t::ptr ast, symbol_val_t::ptr input, symbol_val_t::ptr result, int64_t kernel_x, int64_t kernel_y, int64_t stride_x, int64_t stride_y, int64_t pad_x = 0, int64_t pad_y = 0)
+      : symbol_stmt_t(ast), input(input), result(result), kernel_x(kernel_x), kernel_y(kernel_y), stride_x(stride_x), stride_y(stride_y), pad_x(pad_x), pad_y(pad_y) { }
 };
 
 struct symbol_mm_t : public symbol_stmt_t {
@@ -3053,6 +3090,190 @@ symbol_t::ptr prob(std::shared_ptr<ast_node_t> ast) {
             }
             return std::make_shared<symbol_conv_t>(ast, res, wt, im, sx, sy, px, py);
           }
+        case intrinstmt_t::DECONV: {
+            if (arglist->args.size() < 3 || arglist->args.size() > 7) {
+              ast->error() << "DECONV expect 3~7 arguments, got " << arglist->args.size() << "." << ast->eol();
+              err = true;
+            }
+            if (err) return std::make_shared<symbol_deconv_t>(ast, nullptr, nullptr, nullptr);
+            auto res = arglist->args[2];
+            auto wt = arglist->args[1];
+            auto im = arglist->args[0];
+            auto res_type = res->type->to<symbol_vec_type_t>();
+            auto wt_type = wt->type->to<symbol_vec_type_t>();
+            auto im_type = im->type->to<symbol_vec_type_t>();
+            int64_t sx = 1, sy = 1, px = 0, py = 0;
+            if (!res_type || res_type->is_scalar()) {
+              ast->error() << "DECONV expect vector type for image operand, got " << res->type->name() << ast->eol();
+              res->type->note() << "type defined from here:" << res->type->eol();
+              err = true;
+            }
+            if (!wt_type || wt_type->is_scalar()) {
+              ast->error() << "DECONV expect vector type for weight operand, got " << wt->type->name() << ast->eol();
+              wt->type->note() << "type defined from here:" << wt->type->eol();
+              err = true;
+            }
+            if (!im_type || im_type->is_scalar()) {
+              ast->error() << "DECONV expect vector type for dest operand, got " << im->type->name() << ast->eol();
+              im->type->note() << "type defined from here:" << im->type->eol();
+              err = true;
+            }
+            try {
+              if (arglist->args.size() >= 4) sx = std::get<int64_t>(arglist->args[3]->constexpr_eval());
+              if (arglist->args.size() >= 5) sy = std::get<int64_t>(arglist->args[4]->constexpr_eval());
+              if (arglist->args.size() >= 6) px = std::get<int64_t>(arglist->args[5]->constexpr_eval());
+              if (arglist->args.size() >= 7) py = std::get<int64_t>(arglist->args[6]->constexpr_eval());
+            } catch(...) {
+              ast->error() << "DECONV expect optional constant int (SX, SY, PX, PY) at 4,5,6,7-th arguments." << ast->eol();
+              err = true;
+            }
+            if (err) return std::make_shared<symbol_deconv_t>(ast, nullptr, nullptr, nullptr);
+            size_t res_dim = 0, wt_dim = 0, im_dim = 0;
+            res_dim = res_type->size.size();
+            wt_dim = wt_type->size.size();
+            im_dim = im_type->size.size();
+            if (res_dim != 3 && res_dim != 4) {
+              ast->error() << "DECONV expect 3 dim HWC or 4 dim NHWC vector for image operand, got " << res_dim << ast->eol();
+              res->type->note() << "type defined from here:" << res->type->eol();
+              err = true;
+            }
+            if (wt_dim != 4) {
+              ast->error() << "DECONV expect 4 dim NHWC vector for weight operand, got " << wt_dim << ast->eol();
+              wt->type->note() << "type defined from here:" << wt->type->eol();
+              err = true;
+            }
+            if (im_dim != 3 && im_dim != 4) {
+              ast->error() << "DECONV expect 3 dim HWC or 4 dim NHWC vector for dest operand, got " << im_dim << ast->eol();
+              im->type->note() << "type defined from here:" << im->type->eol();
+              err = true;
+            }
+            if (im_dim != res_dim) {
+              ast->error() << "DECONV expect same dimension of vector for result and image operands, got " << res_dim << " and " << im_dim << ast->eol();
+              res->type->note() << "type defined from here:" << res->type->eol();
+              im->type->note() << "type defined from here:" << im->type->eol();
+              err = true;
+            }
+            if (im_dim == 4 && res_dim == 4 && res_type->size[3] != im_type->size[3]) {
+              ast->error() << "DECONV expect same batch size of result and image operands, got " << res_type->size[3] << " and " << im_type->size[3] << ast->eol();
+              res->type->note() << "type defined from here:" << res->type->eol();
+              im->type->note() << "type defined from here:" << im->type->eol();
+              err = true;
+            }
+            if (wt_dim == 4 && res_dim >= 3 && wt_type->size[3] != res_type->size[0]) {
+              ast->error() << "DECONV expect input features equal to weight batch size, got " << res_type->size[0] << " and " << wt_type->size[3] << ast->eol();
+              res->type->note() << "type defined from here:" << res->type->eol();
+              wt->type->note() << "type defined from here:" << wt->type->eol();
+              err = true;
+            }
+            if (wt_dim == 4 && im_dim >= 3 && wt_type->size[0] != im_type->size[0]) {
+              ast->error() << "DECONV expect dest features equal to weight features, got " << im_type->size[0] << " and " << wt_type->size[0] << ast->eol();
+              im->type->note() << "type defined from here:" << im->type->eol();
+              wt->type->note() << "type defined from here:" << wt->type->eol();
+              err = true;
+            }
+            if (err) return std::make_shared<symbol_deconv_t>(ast, nullptr, nullptr, nullptr);
+            int64_t res_n = res_dim == 4 ? im_type->size[3] : 1;
+            int64_t res_h = (im_type->size[2] - wt_type->size[2] + py * 2 + sy) / sy;
+            int64_t res_w = (im_type->size[1] - wt_type->size[1] + px * 2 + sx) / sx;
+            int64_t res_c = wt_type->size[3];
+            if ((res_dim == 4 && res_n != res_type->size[3]) || res_h != res_type->size[2] || res_w != res_type->size[1] || res_c != res_type->size[0]) {
+              ast->warn() << "DECONV predicated input shape as <" << (res_dim == 4 ? std::to_string(res_n) + ","s : ""s) << res_h << "," << res_w << "," << res_c << ">, got " << res_type->name() << ast->eol();
+              res->type->note() << "type defined from here:" << res->type->eol();
+            }
+            return std::make_shared<symbol_deconv_t>(ast, im, wt, res, sx, sy, px, py);
+          }
+        case intrinstmt_t::RECONV: {
+            if (arglist->args.size() < 3 || arglist->args.size() > 7) {
+              ast->error() << "RECONV expect 3~7 arguments, got " << arglist->args.size() << "." << ast->eol();
+              err = true;
+            }
+            if (err) return std::make_shared<symbol_reconv_t>(ast, nullptr, nullptr, nullptr);
+            auto res = arglist->args[1];
+            auto wt = arglist->args[0];
+            auto im = arglist->args[2];
+            auto res_type = res->type->to<symbol_vec_type_t>();
+            auto wt_type = wt->type->to<symbol_vec_type_t>();
+            auto im_type = im->type->to<symbol_vec_type_t>();
+            int64_t sx = 1, sy = 1, px = 0, py = 0;
+            if (!res_type || res_type->is_scalar()) {
+              ast->error() << "RECONV expect vector type for loss operand, got " << res->type->name() << ast->eol();
+              res->type->note() << "type defined from here:" << res->type->eol();
+              err = true;
+            }
+            if (!wt_type || wt_type->is_scalar()) {
+              ast->error() << "RECONV expect vector type for weight operand, got " << wt->type->name() << ast->eol();
+              wt->type->note() << "type defined from here:" << wt->type->eol();
+              err = true;
+            }
+            if (!im_type || im_type->is_scalar()) {
+              ast->error() << "RECONV expect vector type for image operand, got " << im->type->name() << ast->eol();
+              im->type->note() << "type defined from here:" << im->type->eol();
+              err = true;
+            }
+            try {
+              if (arglist->args.size() >= 4) sx = std::get<int64_t>(arglist->args[3]->constexpr_eval());
+              if (arglist->args.size() >= 5) sy = std::get<int64_t>(arglist->args[4]->constexpr_eval());
+              if (arglist->args.size() >= 6) px = std::get<int64_t>(arglist->args[5]->constexpr_eval());
+              if (arglist->args.size() >= 7) py = std::get<int64_t>(arglist->args[6]->constexpr_eval());
+            } catch(...) {
+              ast->error() << "RECONV expect optional constant int (SX, SY, PX, PY) at 4,5,6,7-th arguments." << ast->eol();
+              err = true;
+            }
+            if (err) return std::make_shared<symbol_reconv_t>(ast, nullptr, nullptr, nullptr);
+            size_t res_dim = 0, wt_dim = 0, im_dim = 0;
+            res_dim = res_type->size.size();
+            wt_dim = wt_type->size.size();
+            im_dim = im_type->size.size();
+            if (res_dim != 3 && res_dim != 4) {
+              ast->error() << "RECONV expect 3 dim HWC or 4 dim NHWC vector for loss operand, got " << res_dim << ast->eol();
+              res->type->note() << "type defined from here:" << res->type->eol();
+              err = true;
+            }
+            if (wt_dim != 4) {
+              ast->error() << "RECONV expect 4 dim NHWC vector for weight operand, got " << wt_dim << ast->eol();
+              wt->type->note() << "type defined from here:" << wt->type->eol();
+              err = true;
+            }
+            if (im_dim != 3 && im_dim != 4) {
+              ast->error() << "RECONV expect 3 dim HWC or 4 dim NHWC vector for image operand, got " << im_dim << ast->eol();
+              im->type->note() << "type defined from here:" << im->type->eol();
+              err = true;
+            }
+            if (im_dim != res_dim) {
+              ast->error() << "RECONV expect same dimension of vector for loss and image operands, got " << res_dim << " and " << im_dim << ast->eol();
+              res->type->note() << "type defined from here:" << res->type->eol();
+              im->type->note() << "type defined from here:" << im->type->eol();
+              err = true;
+            }
+            if (im_dim == 4 && res_dim == 4 && res_type->size[3] != im_type->size[3]) {
+              ast->error() << "RECONV expect same batch size of loss and image operands, got " << res_type->size[3] << " and " << im_type->size[3] << ast->eol();
+              res->type->note() << "type defined from here:" << res->type->eol();
+              im->type->note() << "type defined from here:" << im->type->eol();
+              err = true;
+            }
+            if (wt_dim == 4 && res_dim >= 3 && wt_type->size[3] != res_type->size[0]) {
+              ast->error() << "RECONV expect loss features equal to weight batch size, got " << res_type->size[0] << " and " << wt_type->size[3] << ast->eol();
+              res->type->note() << "type defined from here:" << res->type->eol();
+              wt->type->note() << "type defined from here:" << wt->type->eol();
+              err = true;
+            }
+            if (wt_dim == 4 && im_dim >= 3 && wt_type->size[0] != im_type->size[0]) {
+              ast->error() << "RECONV expect input features equal to weight features, got " << im_type->size[0] << " and " << wt_type->size[0] << ast->eol();
+              im->type->note() << "type defined from here:" << im->type->eol();
+              wt->type->note() << "type defined from here:" << wt->type->eol();
+              err = true;
+            }
+            if (err) return std::make_shared<symbol_reconv_t>(ast, nullptr, nullptr, nullptr);
+            int64_t res_n = res_dim == 4 ? im_type->size[3] : 1;
+            int64_t res_h = (im_type->size[2] - wt_type->size[2] + py * 2 + sy) / sy;
+            int64_t res_w = (im_type->size[1] - wt_type->size[1] + px * 2 + sx) / sx;
+            int64_t res_c = wt_type->size[3];
+            if ((res_dim == 4 && res_n != res_type->size[3]) || res_h != res_type->size[2] || res_w != res_type->size[1] || res_c != res_type->size[0]) {
+              ast->warn() << "RECONV predicated loss shape as <" << (res_dim == 4 ? std::to_string(res_n) + ","s : ""s) << res_h << "," << res_w << "," << res_c << ">, got " << res_type->name() << ast->eol();
+              res->type->note() << "type defined from here:" << res->type->eol();
+            }
+            return std::make_shared<symbol_reconv_t>(ast, wt, res, im, sx, sy, px, py);
+          }
           case intrinstmt_t::POOL: {
             if (arglist->args.size() < 6 || arglist->args.size() > 8) {
               ast->error() << "POOL expect 6~8 arguments, got " << arglist->args.size() << "." << ast->eol();
@@ -3113,6 +3334,67 @@ symbol_t::ptr prob(std::shared_ptr<ast_node_t> ast) {
               res->type->note() << "type defined from here:" << res->type->eol();
             }
             return std::make_shared<symbol_pool_t>(ast, res, im, kx, ky, sx, sy, px, py);
+          }
+          case intrinstmt_t::UNPOOL: {
+            if (arglist->args.size() < 6 || arglist->args.size() > 8) {
+              ast->error() << "UNPOOL expect 6~8 arguments, got " << arglist->args.size() << "." << ast->eol();
+              err = true;
+            }
+            if (err) return std::make_shared<symbol_unpool_t>(ast, nullptr, nullptr, 0, 0, 0, 0);
+            int64_t sx, sy, kx, ky, px = 0, py = 0;
+            auto res = arglist->args[1];
+            auto im = arglist->args[0];
+            auto res_type = res->type->to<symbol_vec_type_t>();
+            auto im_type = im->type->to<symbol_vec_type_t>();
+            if (!res_type || res_type->is_scalar() || !(res_type->size.size() == 3 || res_type->size.size() == 4)) {
+              ast->error() << "UNPOOL expect 3 dim HWC or 4 dim NHWC vector type for result operand. got " << res->type->name() << ast->eol();
+              res->type->note() << "type defined from here:" << res->type->eol();
+              err = true;
+            }
+            if (!im_type || im_type->is_scalar() || !(im_type->size.size() == 3 || im_type->size.size() == 4)) {
+              ast->error() << "UNPOOL expect 3 dim HWC or 4 dim NHWC vector type for input operand. got " << im->type->name() << ast->eol();
+              im->type->note() << "type defined from here:" << im->type->eol();
+              err = true;
+            }
+            try {
+              kx = std::get<int64_t>(arglist->args[2]->constexpr_eval());
+              ky = std::get<int64_t>(arglist->args[3]->constexpr_eval());
+              sx = std::get<int64_t>(arglist->args[4]->constexpr_eval());
+              sy = std::get<int64_t>(arglist->args[5]->constexpr_eval());
+              if (arglist->args.size() >= 7) px = std::get<int64_t>(arglist->args[6]->constexpr_eval());
+              if (arglist->args.size() >= 8) py = std::get<int64_t>(arglist->args[7]->constexpr_eval());
+            } catch(...) {
+              ast->error() << "UNPOOL expect constant int (KX, KY, SX, SY, PX, PY) at 3,4,5,6,7,8-th arguments." << ast->eol();
+              err = true;
+            }
+            if (err) return std::make_shared<symbol_unpool_t>(ast, nullptr, nullptr, 0, 0, 0, 0);
+            if (res_type->size.size() != im_type->size.size()) {
+              ast->error() << "UNPOOL expect same dimension of vector type for destination operand and input operand. got " << res->type->name() << " and " << im->type->name() << ast->eol();
+              res->type->note() << "type defined from here:" << res->type->eol();
+              im->type->note() << "type defined from here:" << im->type->eol();
+              err = true;
+            }
+            if (err) return std::make_shared<symbol_unpool_t>(ast, nullptr, nullptr, 0, 0, 0, 0);
+            if (res_type->size.size() == 4 && res_type->size[3] != im_type->size[3]) {
+              ast->error() << "UNPOOL expect same batch size for destination operand and input operand. got " << res_type->size[3] << " and " << im_type->size[3] << ast->eol();
+              res->type->note() << "type defined from here:" << res->type->eol();
+              im->type->note() << "type defined from here:" << im->type->eol();
+              err = true;
+            }
+            if (res_type->size[0] != im_type->size[0]) {
+              ast->error() << "UNPOOL expect same feature size for destination operand and input operand. got " << res_type->size[0] << " and " << im_type->size[0] << ast->eol();
+              res->type->note() << "type defined from here:" << res->type->eol();
+              im->type->note() << "type defined from here:" << im->type->eol();
+              err = true;
+            }
+            if (err) return std::make_shared<symbol_unpool_t>(ast, nullptr, nullptr, 0, 0, 0, 0);
+            int64_t res_w = (im_type->size[1] - kx + px * 2 + sx) / sx;
+            int64_t res_h = (im_type->size[2] - ky + py * 2 + sy) / sy;
+            if (res_type->size[1] != res_w || res_type->size[2] != res_h) {
+              ast->warn() << "UNPOOL predicated result shape as <" << (res_type->size.size() == 4 ? std::to_string(res_type->size[3]) + ","s : ""s) << res_h << "," << res_w << "," << res_type->size[0] << ">, got " << res_type->name() << ast->eol();
+              res->type->note() << "type defined from here:" << res->type->eol();
+            }
+            return std::make_shared<symbol_unpool_t>(ast, im, res, kx, ky, sx, sy, px, py);
           }
           case intrinstmt_t::MM: {
             if (arglist->args.size() != 3 && arglist->args.size() != 4) {
@@ -3555,7 +3837,7 @@ bool tr_symbol() {
   return true;
 }
 
-constexpr size_t spm_size = 1024 * 1024;
+constexpr size_t spm_size = SPM_SIZE;
 std::bitset<spm_size> spm;
 int64_t mem_size = 0;
 
@@ -4355,6 +4637,34 @@ void exec(symbol_stmt_t::ptr stmt) {
                    stmt->input->type->to<symbol_vec_type_t>()->size[3] : 1;
       pinst("conv", res, wt, im, fi, fo, kx, ky, xi, yi, bt, stmt->stride_x, stmt->stride_y, stmt->pad_x, stmt->pad_y);
     },
+    +[](std::shared_ptr<symbol_deconv_t> stmt) {
+      auto im = std::get<addr_t::ptr>(eval(stmt->input));
+      auto wt = std::get<addr_t::ptr>(eval(stmt->weight));
+      auto res = std::get<addr_t::ptr>(eval(stmt->result));
+      int64_t fi = stmt->input->type->to<symbol_vec_type_t>()->size[0];
+      int64_t fo = stmt->weight->type->to<symbol_vec_type_t>()->size[3];
+      int64_t kx = stmt->weight->type->to<symbol_vec_type_t>()->size[1];
+      int64_t ky = stmt->weight->type->to<symbol_vec_type_t>()->size[2];
+      int64_t xi = stmt->input->type->to<symbol_vec_type_t>()->size[1];
+      int64_t yi = stmt->input->type->to<symbol_vec_type_t>()->size[2];
+      int64_t bt = stmt->input->type->to<symbol_vec_type_t>()->size.size() == 4 ? 
+                   stmt->input->type->to<symbol_vec_type_t>()->size[3] : 1;
+      pinst("deconv", im, wt, res, fi, fo, kx, ky, xi, yi, bt, stmt->stride_x, stmt->stride_y, stmt->pad_x, stmt->pad_y);
+    },
+    +[](std::shared_ptr<symbol_reconv_t> stmt) {
+      auto wt = std::get<addr_t::ptr>(eval(stmt->weight));
+      auto res = std::get<addr_t::ptr>(eval(stmt->result));
+      auto im = std::get<addr_t::ptr>(eval(stmt->input));
+      int64_t fi = stmt->input->type->to<symbol_vec_type_t>()->size[0];
+      int64_t fo = stmt->weight->type->to<symbol_vec_type_t>()->size[3];
+      int64_t kx = stmt->weight->type->to<symbol_vec_type_t>()->size[1];
+      int64_t ky = stmt->weight->type->to<symbol_vec_type_t>()->size[2];
+      int64_t xi = stmt->input->type->to<symbol_vec_type_t>()->size[1];
+      int64_t yi = stmt->input->type->to<symbol_vec_type_t>()->size[2];
+      int64_t bt = stmt->input->type->to<symbol_vec_type_t>()->size.size() == 4 ? 
+                   stmt->input->type->to<symbol_vec_type_t>()->size[3] : 1;
+      pinst("reconv", wt, res, im, fi, fo, kx, ky, xi, yi, bt, stmt->stride_x, stmt->stride_y, stmt->pad_x, stmt->pad_y);
+    },
 
     +[](std::shared_ptr<symbol_pool_t> stmt) {
       auto res = std::get<addr_t::ptr>(eval(stmt->result));
@@ -4369,6 +4679,20 @@ void exec(symbol_stmt_t::ptr stmt) {
       int64_t bt = stmt->input->type->to<symbol_vec_type_t>()->size.size() == 4 ? 
                    stmt->input->type->to<symbol_vec_type_t>()->size[3] : 1;
       pinst("pool", res, im, fi, kx, ky, sx, sy, xi, yi, bt, stmt->pad_x, stmt->pad_y);
+    },
+    +[](std::shared_ptr<symbol_unpool_t> stmt) {
+      auto im = std::get<addr_t::ptr>(eval(stmt->input));
+      auto res = std::get<addr_t::ptr>(eval(stmt->result));
+      int64_t fi = stmt->input->type->to<symbol_vec_type_t>()->size[0];
+      int64_t kx = stmt->kernel_x;
+      int64_t ky = stmt->kernel_y;
+      int64_t sx = stmt->stride_x;
+      int64_t sy = stmt->stride_y;
+      int64_t xi = stmt->input->type->to<symbol_vec_type_t>()->size[1];
+      int64_t yi = stmt->input->type->to<symbol_vec_type_t>()->size[2];
+      int64_t bt = stmt->input->type->to<symbol_vec_type_t>()->size.size() == 4 ? 
+                   stmt->input->type->to<symbol_vec_type_t>()->size[3] : 1;
+      pinst("unpool", im, res, fi, kx, ky, sx, sy, xi, yi, bt, stmt->pad_x, stmt->pad_y);
     },
 
     +[](std::shared_ptr<symbol_mm_t> stmt) {
@@ -4469,67 +4793,67 @@ void exec(symbol_stmt_t::ptr stmt) {
 
         int acc_flag = 0; 
 
-        if(2*fo*ky*kx*fi + 2*yi*xi*fi + 4*yo*xo*fo <= 1048576/2) {
+        if(2*fo*ky*kx*fi + 2*yi*xi*fi + 4*yo*xo*fo <= SPM_SIZE/2) {
           while(1) {
             sp_bt = bt%bt_num ? bt/bt_num+1 : bt/bt_num;
             total_size = fo*ky*kx*fi + 2*sp_bt*yi*xi*fi + 4*sp_bt*yo*xo*fo;
-            if(2*total_size <= 1048576)  break;
+            if(2*total_size <= SPM_SIZE)  break;
             bt_num++;
           }
         }
-        else if(2*fo*ky*kx*fi + 2*ky*xi*fi + 4*xo*fo <= 1048576/2) {
+        else if(2*fo*ky*kx*fi + 2*ky*xi*fi + 4*xo*fo <= SPM_SIZE/2) {
           bt_num = bt;
           sp_bt = 1;
           while(1) {
             sp_yo = yo%yo_num ? yo/yo_num+1 : yo/yo_num;
             total_size = fo*ky*kx*fi + 2*((sp_yo-1)*sy + ky)*xi*fi + 4*sp_yo*xo*fo;
-            if(2*total_size <= 1048576)  break;
+            if(2*total_size <= SPM_SIZE)  break;
             yo_num++;
           }
         }
-        else if(2*32*ky*kx*fi + 2*ky*xi*fi + 4*xo*32 <= 1048576/2) {
+        else if(2*PPU_SIZE*ky*kx*fi + 2*ky*xi*fi + 4*xo*PPU_SIZE <= SPM_SIZE/2) {
           bt_num = bt;
           sp_bt = 1;
           yo_num = yo;
           sp_yo = 1;
-          sp_fo = (fo/32)*32;
+          sp_fo = (fo/PPU_SIZE)*PPU_SIZE;
           while(1) {
             fo_num = fo%sp_fo ? fo/sp_fo+1 : fo/sp_fo;
             total_size = 2*sp_fo*ky*kx*fi + 2*ky*xi*fi + 4*xo*sp_fo;
-            if(2*total_size <= 1048576)  break;
-            sp_fo = sp_fo - 32;
+            if(2*total_size <= SPM_SIZE)  break;
+            sp_fo = sp_fo - PPU_SIZE;
           }
         }
-        else if(fo >= 32 && 2*32*ky*kx*32 + 2*ky*xi*32 + 4*xo*32 <= 1048576/2) {
+        else if(fo >= PPU_SIZE && 2*PPU_SIZE*ky*kx*PPU_SIZE + 2*ky*xi*PPU_SIZE + 4*xo*PPU_SIZE <= SPM_SIZE/2) {
           acc_flag = 1;
           bt_num = bt;
           sp_bt = 1;
           yo_num = yo;
           sp_yo = 1;
-          fo_num = fo%32 ? fo/32+1 : fo/32;
-          sp_fo = 32;
-          sp_fi = (fi/32)*32;
+          fo_num = fo%PPU_SIZE ? fo/PPU_SIZE+1 : fo/PPU_SIZE;
+          sp_fo = PPU_SIZE;
+          sp_fi = (fi/PPU_SIZE)*PPU_SIZE;
           while(1) {
             fi_num = fi%sp_fi ? fi/sp_fi+1 : fi/sp_fi;
-            total_size = 2*32*ky*kx*sp_fi + 2*ky*xi*sp_fi + 4*xo*32;
-            if(2*total_size <= 1048576)  break;
-            sp_fi = sp_fi - 32;
+            total_size = 2*PPU_SIZE*ky*kx*sp_fi + 2*ky*xi*sp_fi + 4*xo*PPU_SIZE;
+            if(2*total_size <= SPM_SIZE)  break;
+            sp_fi = sp_fi - PPU_SIZE;
           }
         }
-        else if(fo < 32 && 2*fo*ky*kx*32 + 2*ky*xi*32 + 4*xo*fo <= 1048576/2) {
+        else if(fo < PPU_SIZE && 2*fo*ky*kx*PPU_SIZE + 2*ky*xi*PPU_SIZE + 4*xo*fo <= SPM_SIZE/2) {
           acc_flag = 1;
           bt_num = bt;
           sp_bt = 1;
           yo_num = yo;
           sp_yo = 1;
-          fo_num = fo%32 ? fo/32+1 : fo/32;
-          sp_fo = 32;
-          sp_fi = (fi/32)*32;
+          fo_num = fo%PPU_SIZE ? fo/PPU_SIZE+1 : fo/PPU_SIZE;
+          sp_fo = PPU_SIZE;
+          sp_fi = (fi/PPU_SIZE)*PPU_SIZE;
           while(1) {
             fi_num = fi%sp_fi ? fi/sp_fi+1 : fi/sp_fi;
             total_size = 2*fo*ky*kx*sp_fi + 2*ky*xi*sp_fi + 4*xo*fo;
-            if(2*total_size <= 1048576)  break;
-            sp_fi = sp_fi - 32;
+            if(2*total_size <= SPM_SIZE)  break;
+            sp_fi = sp_fi - PPU_SIZE;
           }
         }
         else {
@@ -4821,15 +5145,15 @@ void exec(symbol_stmt_t::ptr stmt) {
         int single_flag = 0;
 
         if(stmt->bias != NULL) {
-          if(2*(2*xi*yi + 2*kx*ky + 2 + 4*xo*yo) <= 1048576) {
+          if(2*(2*xi*yi + 2*kx*ky + 2 + 4*xo*yo) <= SPM_SIZE) {
             while(1) {
               bt_num++;
               sp_bt = bt%bt_num ? bt/bt_num+1 : bt/bt_num;
               total_size = 2*sp_bt*xi*yi + 2*kx*ky + 2 + 4*sp_bt*xo*yo;
-              if(2*total_size <= 1048576)  break;
+              if(2*total_size <= SPM_SIZE)  break;
             }
           }
-          else if(2*(kx*ky + 1 + xi*yi + xo*yo) <= 1048576) {
+          else if(2*(kx*ky + 1 + xi*yi + xo*yo) <= SPM_SIZE) {
             single_flag = 1;
           }
           else {
@@ -4838,15 +5162,15 @@ void exec(symbol_stmt_t::ptr stmt) {
           }
         }
         else {
-          if(2*(2*xi*yi + 2*kx*ky + 2*xo*yo) <= 1048576) {
+          if(2*(2*xi*yi + 2*kx*ky + 2*xo*yo) <= SPM_SIZE) {
             while(1) {
               bt_num++;
               sp_bt = bt%bt_num ? bt/bt_num+1 : bt/bt_num;
               total_size = 2*sp_bt*xi*yi + 2*kx*ky + 2*sp_bt*xo*yo;
-              if(2*total_size <= 1048576)  break;
+              if(2*total_size <= SPM_SIZE)  break;
             }
           }
-          else if(2*(kx*ky + xi*yi + xo*yo) <= 1048576) {
+          else if(2*(kx*ky + xi*yi + xo*yo) <= SPM_SIZE) {
             single_flag = 1;
           }
           else {
@@ -5011,27 +5335,27 @@ void exec(symbol_stmt_t::ptr stmt) {
         int64_t sp_fi = fi;
         int fi_num = 0;
         int single_flag = 0;
-        if(2*(2*fi*xi*yi + 2*fi*xo*yo) <= 1048576) {
+        if(2*(2*fi*xi*yi + 2*fi*xo*yo) <= SPM_SIZE) {
           sp_fi = fi;
           fi_num = 1;
           while(1) {
             bt_num++;
             sp_bt = bt%bt_num ? bt/bt_num+1 : bt/bt_num;
             total_size = 2*sp_bt*fi*xi*yi + 2*sp_bt*fi*xo*yo;
-            if(2*total_size <= 1048576)  break;
+            if(2*total_size <= SPM_SIZE)  break;
           }
         }
-        else if(2*(2*xi*yi + 2*xo*yo) <= 1048576) {
+        else if(2*(2*xi*yi + 2*xo*yo) <= SPM_SIZE) {
           sp_bt = 1;
           bt_num = bt;
           while(1) {
             fi_num++;
             sp_fi = fi%fi_num ? fi/fi_num+1 : fi/fi_num;
             total_size = 2*sp_fi*xi*yi + 2*sp_fi*xo*yo;
-            if(2*total_size <= 1048576)  break;
+            if(2*total_size <= SPM_SIZE)  break;
           }
         }
-        else if(2*(xi*yi + xo*yo) <= 1048576) {
+        else if(2*(xi*yi + xo*yo) <= SPM_SIZE) {
           single_flag = 1;
         }
         else {
