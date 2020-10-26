@@ -22,6 +22,7 @@
 #include <sys/ioctl.h>
 #include <cstdio>
 #include <unistd.h>
+#include <cstring>
 
 using namespace std::string_literals;
 
@@ -35,12 +36,13 @@ inline constexpr uint64_t knuth(const char * x) {
 
 int verbose_level = 0;
 #define verbose(level, ...) (verbose_level >= level && [&](){ __VA_ARGS__; return true; }())
+std::map<std::string, bool> warning_silent;
 
 std::set<std::string> keywords = {
   "if", "else", "for", "do", "while", "continue", "break", "return", "print",
-  "sizeof", "typeof", "decltype",
+  "sizeof", "typeof", "decltype", "__func__", "__args__",
   "def", "redef", "async", "await", "except",
-  "conv", "deconv", "reconv", "pool", "unpool", "mm", "act", "trans", "cycleadd", "floor", "strideio",
+  "conv", "deconv", "pool", "mm", "act", "trans", "cycleadd", "floor", "strideio",
   "int", "float", "vector", "extern", "intern", "const", "null",
   "EOPConvolution", "EOPFullyConnected", "EOPPooling", "EOPDepthwiseConv"
 };
@@ -270,7 +272,6 @@ void read_source(const char* fn) {
     }
   }
   if (!line.empty()) raw.push_back(line);
-  raw.push_back("[EOF]");
 }
 
 std::vector<token_t> tokens;
@@ -630,6 +631,8 @@ struct ast_node_t : public cursor_t, std::enable_shared_from_this<ast_node_t> {
 
 struct ident_t;
 struct null_t;
+struct funcname_t;
+struct funcargs_t;
 struct expr_t;
 struct assignexpr_t;
 struct arglist_t;
@@ -719,6 +722,16 @@ struct null_t : public ast_node_t {
     return expect_key("null");
   }
 };
+struct funcname_t : public ast_node_t {
+  virtual bool _parse() {
+    return expect_key("__func__");
+  }
+};
+struct funcargs_t : public ast_node_t {
+  virtual bool _parse() {
+    return expect_key("__args__");
+  }
+};
 
 struct fake_assign_t : public ast_node_t {
   std::shared_ptr<ident_t> lhs;
@@ -748,8 +761,10 @@ struct pexpr_t : public ast_node_t {
   std::shared_ptr<iexpr_t> i;
   std::shared_ptr<fexpr_t> f;
   std::shared_ptr<null_t> n;
+  std::shared_ptr<funcname_t> fn;
+  std::shared_ptr<funcargs_t> fa;
   virtual bool _parse() {
-    return expect(n) || expect(s) || expect(v) || expect(i) || expect(f) ||
+    return expect(n) || expect(fn) || expect(fa) || expect(s) || expect(v) || expect(i) || expect(f) ||
            guard(expect_punc("(") && expect(e) && expect_punc(")"));
   }
 };
@@ -1145,11 +1160,11 @@ struct arglist_t : public ast_node_t {
 
 struct intrinstmt_t : public ast_node_t {
   int opcode;
-  enum { CONV, POOL, MM, ACT, TRANS, CYCLEADD, FLOOR, STRIDEIO, DECONV, RECONV, UNPOOL };
+  enum { CONV, POOL, MM, ACT, TRANS, CYCLEADD, FLOOR, STRIDEIO, DECONV };
   std::shared_ptr<arglist_t> args;
 
   virtual bool _parse() {
-    return guard(expect_multikeys(opcode, CONV, "conv", "pool", "mm", "act", "trans", "cycleadd", "floor", "strideio", "deconv", "reconv", "unpool") && expect(args) && expect_punc(";"));
+    return guard(expect_multikeys(opcode, CONV, "conv", "pool", "mm", "act", "trans", "cycleadd", "floor", "strideio", "deconv") && expect(args) && expect_punc(";"));
   }
 };
 
@@ -1663,10 +1678,31 @@ struct symbol_arglist_t : public symbol_val_t {
     }
     args.push_back(rhs);
   }
+  symbol_arglist_t(ast_node_t::ptr ast, std::vector<symbol_val_t::ptr> args) : symbol_val_t(ast, args.empty() ?
+      symbol_void_type_t::new_() : args.back()->type), args(args) { }
+  void expand_funcargs();
   virtual simval_t constexpr_eval() const { return args.back()->constexpr_eval(); }
   virtual bool lvalue() const { return args.back()->lvalue(); }
   virtual bool rvvalue() const { return args.back()->rvvalue(); }
 };
+
+struct symbol_funcargs_t : public symbol_arglist_t {
+  using symbol_arglist_t::symbol_arglist_t;
+};
+
+void symbol_arglist_t::expand_funcargs() {
+  decltype(args) nargs;
+  for (auto&& v : args) {
+    auto fa = v->to<symbol_funcargs_t>();
+    if (fa) {
+      fa->expand_funcargs();
+      nargs.insert(nargs.end(), fa->args.begin(), fa->args.end());
+    } else {
+      nargs.insert(nargs.end(), v);
+    }
+  }
+  args = std::move(nargs);
+}
 
 struct symbol_call_t : public symbol_val_t {
   bool async;
@@ -1997,17 +2033,6 @@ struct symbol_deconv_t : public symbol_stmt_t {
   symbol_deconv_t(ast_node_t::ptr ast, symbol_val_t::ptr input, symbol_val_t::ptr weight, symbol_val_t::ptr result, int64_t stride_x = 1, int64_t stride_y = 1, int64_t pad_x = 0, int64_t pad_y = 0)
       : symbol_stmt_t(ast), input(input), weight(weight), result(result), stride_x(stride_x), stride_y(stride_y), pad_x(pad_x), pad_y(pad_y) { }
 };
-struct symbol_reconv_t : public symbol_stmt_t {
-  symbol_val_t::ptr weight;
-  symbol_val_t::ptr result;
-  symbol_val_t::ptr input;
-  int64_t stride_x;
-  int64_t stride_y;
-  int64_t pad_x;
-  int64_t pad_y;
-  symbol_reconv_t(ast_node_t::ptr ast, symbol_val_t::ptr weight, symbol_val_t::ptr result, symbol_val_t::ptr input, int64_t stride_x = 1, int64_t stride_y = 1, int64_t pad_x = 0, int64_t pad_y = 0)
-      : symbol_stmt_t(ast), weight(weight), result(result), input(input), stride_x(stride_x), stride_y(stride_y), pad_x(pad_x), pad_y(pad_y) { }
-};
 
 struct symbol_pool_t : public symbol_stmt_t {
   symbol_val_t::ptr result;
@@ -2020,18 +2045,6 @@ struct symbol_pool_t : public symbol_stmt_t {
   int64_t pad_y;
   symbol_pool_t(ast_node_t::ptr ast, symbol_val_t::ptr result, symbol_val_t::ptr input, int64_t kernel_x, int64_t kernel_y, int64_t stride_x, int64_t stride_y, int64_t pad_x = 0, int64_t pad_y = 0)
       : symbol_stmt_t(ast), result(result), input(input), kernel_x(kernel_x), kernel_y(kernel_y), stride_x(stride_x), stride_y(stride_y), pad_x(pad_x), pad_y(pad_y) { }
-};
-struct symbol_unpool_t : public symbol_stmt_t {
-  symbol_val_t::ptr input;
-  symbol_val_t::ptr result;
-  int64_t kernel_x;
-  int64_t kernel_y;
-  int64_t stride_x;
-  int64_t stride_y;
-  int64_t pad_x;
-  int64_t pad_y;
-  symbol_unpool_t(ast_node_t::ptr ast, symbol_val_t::ptr input, symbol_val_t::ptr result, int64_t kernel_x, int64_t kernel_y, int64_t stride_x, int64_t stride_y, int64_t pad_x = 0, int64_t pad_y = 0)
-      : symbol_stmt_t(ast), input(input), result(result), kernel_x(kernel_x), kernel_y(kernel_y), stride_x(stride_x), stride_y(stride_y), pad_x(pad_x), pad_y(pad_y) { }
 };
 
 struct symbol_mm_t : public symbol_stmt_t {
@@ -2073,7 +2086,14 @@ struct symbol_strideio_t : public symbol_stmt_t {
   int64_t size;
   int64_t stride;
   int64_t n;
-  symbol_strideio_t(ast_node_t::ptr ast, symbol_val_t::ptr dest, symbol_val_t::ptr src, int64_t size, int64_t stride, int64_t n) : symbol_stmt_t(ast), dest(dest), src(src), size(size), stride(stride), n(n) { }
+  int64_t dest_stride;
+  symbol_val_t::ptr vsize;
+  symbol_val_t::ptr vstride;
+  symbol_val_t::ptr vn;
+  symbol_val_t::ptr vdest_stride;
+  bool v;
+  symbol_strideio_t(ast_node_t::ptr ast, symbol_val_t::ptr dest, symbol_val_t::ptr src, int64_t size, int64_t stride, int64_t n, int64_t dest_stride) : symbol_stmt_t(ast), dest(dest), src(src), size(size), stride(stride), n(n), dest_stride(dest_stride), v(false) { }
+  symbol_strideio_t(ast_node_t::ptr ast, symbol_val_t::ptr dest, symbol_val_t::ptr src, symbol_val_t::ptr size, symbol_val_t::ptr stride, symbol_val_t::ptr n, symbol_val_t::ptr dest_stride) : symbol_stmt_t(ast), dest(dest), src(src), vsize(size), vstride(stride), vn(n), vdest_stride(dest_stride), v(true) {  }
 };
 
 struct symbol_builtin_conv_t : public symbol_stmt_t {
@@ -2284,6 +2304,20 @@ symbol_t::ptr prob(std::shared_ptr<ast_node_t> ast) {
       return std::make_shared<symbol_lit_t>(ast, ast->lit);
     },
 
+    +[](std::shared_ptr<funcname_t> ast)->symbol_t::ptr {
+      if (function_instantiation_stack.empty())
+        return std::make_shared<symbol_lit_t>(ast, "__main__"s);
+      else
+        return std::make_shared<symbol_lit_t>(ast, function_instantiation_stack.back().func_type->func_name);
+    },
+
+    +[](std::shared_ptr<funcargs_t> ast)->symbol_t::ptr {
+      if (function_instantiation_stack.empty())
+        return std::make_shared<symbol_lit_t>(ast, ""s);
+      else
+        return std::make_shared<symbol_funcargs_t>(ast, function_instantiation_stack.back().args);
+    },
+
     +[](std::shared_ptr<vexpr_t> ast)->symbol_t::ptr {
       auto v = prob(ast->var);
       if (v is typeid(symbol_null_t)) {
@@ -2310,6 +2344,8 @@ symbol_t::ptr prob(std::shared_ptr<ast_node_t> ast) {
 
     +[](std::shared_ptr<pexpr_t> ast)->symbol_t::ptr {
       if (ast->n) return prob(ast->n);
+      if (ast->fn) return prob(ast->fn);
+      if (ast->fa) return prob(ast->fa);
       if (ast->s) return prob(ast->s);
       if (ast->v) return prob(ast->v);
       if (ast->i) return prob(ast->i);
@@ -2338,23 +2374,14 @@ symbol_t::ptr prob(std::shared_ptr<ast_node_t> ast) {
         } return 0;
       };
       rvck(lhs);
-      verbose( 2, __LINE__);
       if (lhs->type->degrade() is typeid(symbol_void_type_t)) {
-      verbose( 2, __LINE__);
         ast->error() << "operand of type " << lhs->type->name() << " is not subscriptable." << ast->eol();
-      verbose( 2, __LINE__);
         lhs->type->note() << "type defined from here:" << lhs->type->eol();
-      verbose( 2, __LINE__);
       }
-      verbose( 2, __LINE__);
       if (!(desc->type is typeid(symbol_int_type_t))) {
-      verbose( 2, __LINE__);
         ast->error() << "subscript must be an int, got " << desc->type->name() << "." << ast->eol();
-      verbose( 2, __LINE__);
         desc->type->note() << "type defined from here:" << desc->type->eol();
-      verbose( 2, __LINE__);
       }
-      verbose( 2, __LINE__);
       return std::make_shared<symbol_descript_t>(ast, lhs, desc);
     },
 
@@ -2712,6 +2739,7 @@ symbol_t::ptr prob(std::shared_ptr<ast_node_t> ast) {
       rvck(obj);
       if (objs) {
         for (auto&& o : objs->args) rvck(o);
+        objs->expand_funcargs();
       }
       return std::make_shared<symbol_print_t>(ast, obj);
     },
@@ -3182,98 +3210,6 @@ symbol_t::ptr prob(std::shared_ptr<ast_node_t> ast) {
             }
             return std::make_shared<symbol_deconv_t>(ast, im, wt, res, sx, sy, px, py);
           }
-        case intrinstmt_t::RECONV: {
-            if (arglist->args.size() < 3 || arglist->args.size() > 7) {
-              ast->error() << "RECONV expect 3~7 arguments, got " << arglist->args.size() << "." << ast->eol();
-              err = true;
-            }
-            if (err) return std::make_shared<symbol_reconv_t>(ast, nullptr, nullptr, nullptr);
-            auto res = arglist->args[1];
-            auto wt = arglist->args[0];
-            auto im = arglist->args[2];
-            auto res_type = res->type->to<symbol_vec_type_t>();
-            auto wt_type = wt->type->to<symbol_vec_type_t>();
-            auto im_type = im->type->to<symbol_vec_type_t>();
-            int64_t sx = 1, sy = 1, px = 0, py = 0;
-            if (!res_type || res_type->is_scalar()) {
-              ast->error() << "RECONV expect vector type for loss operand, got " << res->type->name() << ast->eol();
-              res->type->note() << "type defined from here:" << res->type->eol();
-              err = true;
-            }
-            if (!wt_type || wt_type->is_scalar()) {
-              ast->error() << "RECONV expect vector type for weight operand, got " << wt->type->name() << ast->eol();
-              wt->type->note() << "type defined from here:" << wt->type->eol();
-              err = true;
-            }
-            if (!im_type || im_type->is_scalar()) {
-              ast->error() << "RECONV expect vector type for image operand, got " << im->type->name() << ast->eol();
-              im->type->note() << "type defined from here:" << im->type->eol();
-              err = true;
-            }
-            try {
-              if (arglist->args.size() >= 4) sx = std::get<int64_t>(arglist->args[3]->constexpr_eval());
-              if (arglist->args.size() >= 5) sy = std::get<int64_t>(arglist->args[4]->constexpr_eval());
-              if (arglist->args.size() >= 6) px = std::get<int64_t>(arglist->args[5]->constexpr_eval());
-              if (arglist->args.size() >= 7) py = std::get<int64_t>(arglist->args[6]->constexpr_eval());
-            } catch(...) {
-              ast->error() << "RECONV expect optional constant int (SX, SY, PX, PY) at 4,5,6,7-th arguments." << ast->eol();
-              err = true;
-            }
-            if (err) return std::make_shared<symbol_reconv_t>(ast, nullptr, nullptr, nullptr);
-            size_t res_dim = 0, wt_dim = 0, im_dim = 0;
-            res_dim = res_type->size.size();
-            wt_dim = wt_type->size.size();
-            im_dim = im_type->size.size();
-            if (res_dim != 3 && res_dim != 4) {
-              ast->error() << "RECONV expect 3 dim HWC or 4 dim NHWC vector for loss operand, got " << res_dim << ast->eol();
-              res->type->note() << "type defined from here:" << res->type->eol();
-              err = true;
-            }
-            if (wt_dim != 4) {
-              ast->error() << "RECONV expect 4 dim NHWC vector for weight operand, got " << wt_dim << ast->eol();
-              wt->type->note() << "type defined from here:" << wt->type->eol();
-              err = true;
-            }
-            if (im_dim != 3 && im_dim != 4) {
-              ast->error() << "RECONV expect 3 dim HWC or 4 dim NHWC vector for image operand, got " << im_dim << ast->eol();
-              im->type->note() << "type defined from here:" << im->type->eol();
-              err = true;
-            }
-            if (im_dim != res_dim) {
-              ast->error() << "RECONV expect same dimension of vector for loss and image operands, got " << res_dim << " and " << im_dim << ast->eol();
-              res->type->note() << "type defined from here:" << res->type->eol();
-              im->type->note() << "type defined from here:" << im->type->eol();
-              err = true;
-            }
-            if (im_dim == 4 && res_dim == 4 && res_type->size[3] != im_type->size[3]) {
-              ast->error() << "RECONV expect same batch size of loss and image operands, got " << res_type->size[3] << " and " << im_type->size[3] << ast->eol();
-              res->type->note() << "type defined from here:" << res->type->eol();
-              im->type->note() << "type defined from here:" << im->type->eol();
-              err = true;
-            }
-            if (wt_dim == 4 && res_dim >= 3 && wt_type->size[3] != res_type->size[0]) {
-              ast->error() << "RECONV expect loss features equal to weight batch size, got " << res_type->size[0] << " and " << wt_type->size[3] << ast->eol();
-              res->type->note() << "type defined from here:" << res->type->eol();
-              wt->type->note() << "type defined from here:" << wt->type->eol();
-              err = true;
-            }
-            if (wt_dim == 4 && im_dim >= 3 && wt_type->size[0] != im_type->size[0]) {
-              ast->error() << "RECONV expect input features equal to weight features, got " << im_type->size[0] << " and " << wt_type->size[0] << ast->eol();
-              im->type->note() << "type defined from here:" << im->type->eol();
-              wt->type->note() << "type defined from here:" << wt->type->eol();
-              err = true;
-            }
-            if (err) return std::make_shared<symbol_reconv_t>(ast, nullptr, nullptr, nullptr);
-            int64_t res_n = res_dim == 4 ? im_type->size[3] : 1;
-            int64_t res_h = (im_type->size[2] - wt_type->size[2] + py * 2 + sy) / sy;
-            int64_t res_w = (im_type->size[1] - wt_type->size[1] + px * 2 + sx) / sx;
-            int64_t res_c = wt_type->size[3];
-            if ((res_dim == 4 && res_n != res_type->size[3]) || res_h != res_type->size[2] || res_w != res_type->size[1] || res_c != res_type->size[0]) {
-              ast->warn() << "RECONV predicated loss shape as <" << (res_dim == 4 ? std::to_string(res_n) + ","s : ""s) << res_h << "," << res_w << "," << res_c << ">, got " << res_type->name() << ast->eol();
-              res->type->note() << "type defined from here:" << res->type->eol();
-            }
-            return std::make_shared<symbol_reconv_t>(ast, wt, res, im, sx, sy, px, py);
-          }
           case intrinstmt_t::POOL: {
             if (arglist->args.size() < 6 || arglist->args.size() > 8) {
               ast->error() << "POOL expect 6~8 arguments, got " << arglist->args.size() << "." << ast->eol();
@@ -3334,67 +3270,6 @@ symbol_t::ptr prob(std::shared_ptr<ast_node_t> ast) {
               res->type->note() << "type defined from here:" << res->type->eol();
             }
             return std::make_shared<symbol_pool_t>(ast, res, im, kx, ky, sx, sy, px, py);
-          }
-          case intrinstmt_t::UNPOOL: {
-            if (arglist->args.size() < 6 || arglist->args.size() > 8) {
-              ast->error() << "UNPOOL expect 6~8 arguments, got " << arglist->args.size() << "." << ast->eol();
-              err = true;
-            }
-            if (err) return std::make_shared<symbol_unpool_t>(ast, nullptr, nullptr, 0, 0, 0, 0);
-            int64_t sx, sy, kx, ky, px = 0, py = 0;
-            auto res = arglist->args[1];
-            auto im = arglist->args[0];
-            auto res_type = res->type->to<symbol_vec_type_t>();
-            auto im_type = im->type->to<symbol_vec_type_t>();
-            if (!res_type || res_type->is_scalar() || !(res_type->size.size() == 3 || res_type->size.size() == 4)) {
-              ast->error() << "UNPOOL expect 3 dim HWC or 4 dim NHWC vector type for result operand. got " << res->type->name() << ast->eol();
-              res->type->note() << "type defined from here:" << res->type->eol();
-              err = true;
-            }
-            if (!im_type || im_type->is_scalar() || !(im_type->size.size() == 3 || im_type->size.size() == 4)) {
-              ast->error() << "UNPOOL expect 3 dim HWC or 4 dim NHWC vector type for input operand. got " << im->type->name() << ast->eol();
-              im->type->note() << "type defined from here:" << im->type->eol();
-              err = true;
-            }
-            try {
-              kx = std::get<int64_t>(arglist->args[2]->constexpr_eval());
-              ky = std::get<int64_t>(arglist->args[3]->constexpr_eval());
-              sx = std::get<int64_t>(arglist->args[4]->constexpr_eval());
-              sy = std::get<int64_t>(arglist->args[5]->constexpr_eval());
-              if (arglist->args.size() >= 7) px = std::get<int64_t>(arglist->args[6]->constexpr_eval());
-              if (arglist->args.size() >= 8) py = std::get<int64_t>(arglist->args[7]->constexpr_eval());
-            } catch(...) {
-              ast->error() << "UNPOOL expect constant int (KX, KY, SX, SY, PX, PY) at 3,4,5,6,7,8-th arguments." << ast->eol();
-              err = true;
-            }
-            if (err) return std::make_shared<symbol_unpool_t>(ast, nullptr, nullptr, 0, 0, 0, 0);
-            if (res_type->size.size() != im_type->size.size()) {
-              ast->error() << "UNPOOL expect same dimension of vector type for destination operand and input operand. got " << res->type->name() << " and " << im->type->name() << ast->eol();
-              res->type->note() << "type defined from here:" << res->type->eol();
-              im->type->note() << "type defined from here:" << im->type->eol();
-              err = true;
-            }
-            if (err) return std::make_shared<symbol_unpool_t>(ast, nullptr, nullptr, 0, 0, 0, 0);
-            if (res_type->size.size() == 4 && res_type->size[3] != im_type->size[3]) {
-              ast->error() << "UNPOOL expect same batch size for destination operand and input operand. got " << res_type->size[3] << " and " << im_type->size[3] << ast->eol();
-              res->type->note() << "type defined from here:" << res->type->eol();
-              im->type->note() << "type defined from here:" << im->type->eol();
-              err = true;
-            }
-            if (res_type->size[0] != im_type->size[0]) {
-              ast->error() << "UNPOOL expect same feature size for destination operand and input operand. got " << res_type->size[0] << " and " << im_type->size[0] << ast->eol();
-              res->type->note() << "type defined from here:" << res->type->eol();
-              im->type->note() << "type defined from here:" << im->type->eol();
-              err = true;
-            }
-            if (err) return std::make_shared<symbol_unpool_t>(ast, nullptr, nullptr, 0, 0, 0, 0);
-            int64_t res_w = (im_type->size[1] - kx + px * 2 + sx) / sx;
-            int64_t res_h = (im_type->size[2] - ky + py * 2 + sy) / sy;
-            if (res_type->size[1] != res_w || res_type->size[2] != res_h) {
-              ast->warn() << "UNPOOL predicated result shape as <" << (res_type->size.size() == 4 ? std::to_string(res_type->size[3]) + ","s : ""s) << res_h << "," << res_w << "," << res_type->size[0] << ">, got " << res_type->name() << ast->eol();
-              res->type->note() << "type defined from here:" << res->type->eol();
-            }
-            return std::make_shared<symbol_unpool_t>(ast, im, res, kx, ky, sx, sy, px, py);
           }
           case intrinstmt_t::MM: {
             if (arglist->args.size() != 3 && arglist->args.size() != 4) {
@@ -3576,19 +3451,37 @@ symbol_t::ptr prob(std::shared_ptr<ast_node_t> ast) {
             return std::make_shared<symbol_floor_t>(ast, res, im);
           }
           case intrinstmt_t::STRIDEIO: {
-            if (arglist->args.size() != 5) {
-              ast->error() << "STRIDEIO expect 5 arguments, got " << arglist->args.size() << "." << ast->eol();
+            if (arglist->args.size() != 5 && arglist->args.size() != 6) {
+              ast->error() << "STRIDEIO expect 5 or 6 arguments, got " << arglist->args.size() << "." << ast->eol();
               break;
             }
             auto dest = arglist->args[0];
             auto src = arglist->args[1];
-            int64_t size, stride, n;
+            int64_t size, stride, n, dest_stride;
+            symbol_val_t::ptr vsize, vstride, vn, vdest_stride;
+            bool c = false, v = false;
             try {
               size = std::get<int64_t>(arglist->args[2]->constexpr_eval());
               stride = std::get<int64_t>(arglist->args[3]->constexpr_eval());
               n = std::get<int64_t>(arglist->args[4]->constexpr_eval());
+              dest_stride = size;
+              if (arglist->args.size() == 6) dest_stride = std::get<int64_t>(arglist->args[5]->constexpr_eval());
+              c = true;
             } catch(...) {
-              ast->error() << "STRIDEIO expect constant int (SEGMENT_SIZE, STRIDE_SIZE, N_SEGMENT) at 3,4,5-th arguments." << ast->eol();
+              c = false;
+            }
+            if (!c) {
+              v = true;
+              vsize = arglist->args[2]; if (!vsize->type->to<symbol_int_type_t>()) v = false;
+              vstride = arglist->args[3]; if (!vstride->type->to<symbol_int_type_t>()) v = false;
+              vn = arglist->args[4]; if (!vn->type->to<symbol_int_type_t>()) v = false;
+              vdest_stride = nullptr;
+              if (arglist->args.size() == 6) {
+                vdest_stride = arglist->args[5]; if (!vdest_stride->type->to<symbol_int_type_t>()) v = false;
+              }
+            }
+            if (!c && !v) {
+              ast->error() << "STRIDEIO expect int (SEGMENT_SIZE, SRC_STRIDE_SIZE, N_SEGMENT[, DEST_STRIDE_SIZE]) at 3,4,5,6-th arguments." << ast->eol();
               break;
             }
             auto dest_type = dest->type->to<symbol_vec_type_t>();
@@ -3603,24 +3496,25 @@ symbol_t::ptr prob(std::shared_ptr<ast_node_t> ast) {
               src->type->note() << "type defined from here:" << src->type->eol();
               err = true;
             }
-            if (dest->type->external == src->type->external) {
-              ast->error() << "STRIDEIO expect different storage property for dest and source operand (1 external and 1 internal). got " << dest->type->name() << " and " << src->type->name() << " respectively." << ast->eol();
+            if (dest->type->external && src->type->external) {
+              ast->error() << "STRIDEIO expect at least one operand with internal storage property. got " << dest->type->name() << " and " << src->type->name() << " respectively." << ast->eol();
               dest->type->note() << "type defined from here:" << dest->type->eol();
               src->type->note() << "type defined from here:" << src->type->eol();
               err = true;
             }
             if (err) break;
-            auto extl = dest->type->external ? dest : src;
-            auto intl = dest->type->external ? src : dest;
-            if (stride * (n - 1) + size > extl->type->sizeof_() && extl->type->sizeof_() > 0) {
-              ast->warn() << "STRIDEIO accesses out of boundary. accesses " << (stride * (n-1) + size) << " bytes from " << extl->type->name() << "(" << extl->type->sizeof_() << " bytes)." << ast->eol();
-              extl->type->note() << "type defined from here:" << extl->type->eol();
+            if (v) { return std::make_shared<symbol_strideio_t>(ast, dest, src, vsize, vstride, vn, vdest_stride); }
+            if (!warning_silent["strideio-range"]) { 
+              if ((stride * (n - 1) + size) > src->type->sizeof_() && src->type->sizeof_() > 0) {
+                ast->warn() << "STRIDEIO reads out of the src variable's defined range. accesses " << ((stride * (n-1) + size)) << " bytes from " << src->type->name() << "(" << src->type->sizeof_() << " bytes). [-wstrideio-range]" << ast->eol();
+                src->type->note() << "type defined from here:" << src->type->eol();
+              }
+              if (dest_stride * (n - 1) + size > dest->type->sizeof_() && dest->type->sizeof_() > 0) {
+                ast->warn() << "STRIDEIO writes out of the dest variable's defined range. accesses " << (dest_stride * (n-1) + size) << " bytes from " << dest->type->name() << "(" << dest->type->sizeof_() << " bytes). [-wstrideio-range]" << ast->eol();
+                dest->type->note() << "type defined from here:" << dest->type->eol();
+              }
             }
-            if (n * size > intl->type->sizeof_() && intl->type->sizeof_() > 0) {
-              ast->warn() << "STRIDEIO accesses out of boundary. accesses " << (n * size) << " bytes from " << intl->type->name() << "(" << intl->type->sizeof_() << " bytes)." << ast->eol();
-              intl->type->note() << "type defined from here:" << intl->type->eol();
-            }
-            return std::make_shared<symbol_strideio_t>(ast, dest, src, size, stride, n);
+            return std::make_shared<symbol_strideio_t>(ast, dest, src, size, stride, n, dest_stride);
           }
           default:
             ast->error() << "intrinsic not implemented." << ast->eol();
@@ -4080,6 +3974,14 @@ genval_t eval(symbol_val_t::ptr val) {
     },
 
     +[](std::shared_ptr<symbol_arglist_t> val)->genval_t {
+      genval_t arg;
+      for (auto&& a : val->args) {
+        arg = eval(a);
+      }
+      return arg;
+    },
+
+    +[](std::shared_ptr<symbol_funcargs_t> val)->genval_t {
       genval_t arg;
       for (auto&& a : val->args) {
         arg = eval(a);
@@ -4651,20 +4553,6 @@ void exec(symbol_stmt_t::ptr stmt) {
                    stmt->input->type->to<symbol_vec_type_t>()->size[3] : 1;
       pinst("deconv", im, wt, res, fi, fo, kx, ky, xi, yi, bt, stmt->stride_x, stmt->stride_y, stmt->pad_x, stmt->pad_y);
     },
-    +[](std::shared_ptr<symbol_reconv_t> stmt) {
-      auto wt = std::get<addr_t::ptr>(eval(stmt->weight));
-      auto res = std::get<addr_t::ptr>(eval(stmt->result));
-      auto im = std::get<addr_t::ptr>(eval(stmt->input));
-      int64_t fi = stmt->input->type->to<symbol_vec_type_t>()->size[0];
-      int64_t fo = stmt->weight->type->to<symbol_vec_type_t>()->size[3];
-      int64_t kx = stmt->weight->type->to<symbol_vec_type_t>()->size[1];
-      int64_t ky = stmt->weight->type->to<symbol_vec_type_t>()->size[2];
-      int64_t xi = stmt->input->type->to<symbol_vec_type_t>()->size[1];
-      int64_t yi = stmt->input->type->to<symbol_vec_type_t>()->size[2];
-      int64_t bt = stmt->input->type->to<symbol_vec_type_t>()->size.size() == 4 ? 
-                   stmt->input->type->to<symbol_vec_type_t>()->size[3] : 1;
-      pinst("reconv", wt, res, im, fi, fo, kx, ky, xi, yi, bt, stmt->stride_x, stmt->stride_y, stmt->pad_x, stmt->pad_y);
-    },
 
     +[](std::shared_ptr<symbol_pool_t> stmt) {
       auto res = std::get<addr_t::ptr>(eval(stmt->result));
@@ -4679,20 +4567,6 @@ void exec(symbol_stmt_t::ptr stmt) {
       int64_t bt = stmt->input->type->to<symbol_vec_type_t>()->size.size() == 4 ? 
                    stmt->input->type->to<symbol_vec_type_t>()->size[3] : 1;
       pinst("pool", res, im, fi, kx, ky, sx, sy, xi, yi, bt, stmt->pad_x, stmt->pad_y);
-    },
-    +[](std::shared_ptr<symbol_unpool_t> stmt) {
-      auto im = std::get<addr_t::ptr>(eval(stmt->input));
-      auto res = std::get<addr_t::ptr>(eval(stmt->result));
-      int64_t fi = stmt->input->type->to<symbol_vec_type_t>()->size[0];
-      int64_t kx = stmt->kernel_x;
-      int64_t ky = stmt->kernel_y;
-      int64_t sx = stmt->stride_x;
-      int64_t sy = stmt->stride_y;
-      int64_t xi = stmt->input->type->to<symbol_vec_type_t>()->size[1];
-      int64_t yi = stmt->input->type->to<symbol_vec_type_t>()->size[2];
-      int64_t bt = stmt->input->type->to<symbol_vec_type_t>()->size.size() == 4 ? 
-                   stmt->input->type->to<symbol_vec_type_t>()->size[3] : 1;
-      pinst("unpool", im, res, fi, kx, ky, sx, sy, xi, yi, bt, stmt->pad_x, stmt->pad_y);
     },
 
     +[](std::shared_ptr<symbol_mm_t> stmt) {
@@ -4742,10 +4616,29 @@ void exec(symbol_stmt_t::ptr stmt) {
     +[](std::shared_ptr<symbol_strideio_t> stmt) {
       auto dest = std::get<addr_t::ptr>(eval(stmt->dest));
       auto src = std::get<addr_t::ptr>(eval(stmt->src));
-      int64_t size = stmt->size;
-      int64_t stride = stmt->stride;
-      int64_t n = stmt->n;
-      pinst("strideio", dest, src, size, stride, n);
+      if (!stmt->v) {
+        int64_t size = stmt->size;
+        int64_t stride = stmt->stride;
+        int64_t n = stmt->n;
+        int64_t dest_stride = stmt->dest_stride;
+        pinst("strideio", dest, src, size, stride, n, dest_stride);
+      } else {
+        auto toreg = [](symbol_val_t::ptr sym)->reg_t {
+          auto val = eval(sym);
+          if (std::holds_alternative<addr_t::ptr>(val)) {
+            reg_t r = reg_t::alloc(sym);
+            pinst("loads", r, std::get<addr_t::ptr>(val)->opr(sym));
+            return r;
+          }
+          return std::get<reg_t>(val);
+        };
+        reg_t size = toreg(stmt->vsize);
+        reg_t stride = toreg(stmt->vstride);
+        reg_t n = toreg(stmt->vn);
+        reg_t dest_stride = size;
+        if (stmt->vdest_stride) dest_stride = toreg(stmt->vdest_stride);
+        pinst("strideio", dest, src, (const reg_t)size, (const reg_t)stride, n, (reg_t)dest_stride);
+      }
     },
 
     +[](std::shared_ptr<symbol_builtin_conv_t> stmt) {
@@ -4771,7 +4664,6 @@ void exec(symbol_stmt_t::ptr stmt) {
         yi = yi + 2*py;
         int64_t xo = (xi - kx + sx) / sx;
         int64_t yo = (yi - ky + sy) / sy;
-        printf("parser.cpp: CONV parameters:\n bt = %d\n xi = %d, yi = %d\n fi = %d, fo = %d\n kx = %d, ky = %d, sx = %d, sy = %d\n xo = %d, yo = %d\n", bt, xi, yi, fi, fo, kx, ky, sx, sy, xo, yo);
 
         int64_t total_size;
 
@@ -4857,10 +4749,9 @@ void exec(symbol_stmt_t::ptr stmt) {
           }
         }
         else {
-          printf("parser.cpp CONV too large to handle!!!");
-          exit(0);
+          stmt->error() << "CONV too large to handle!!!" << stmt->eol();
+          return;
         }
-        printf("parser.cpp: acc_flag = %d, CONV:\n bt = %d, bt_num = %d, sp_bt = %d\n yo = %d, yo_num = %d, sp_yo = %d\n fo = %d, fo_num = %d, sp_fo = %d\n fi = %d, fi_num = %d, sp_fi = %d\n 2*total_size = %d <= 1048576\n", acc_flag, bt, bt_num, sp_bt, yo, yo_num, sp_yo, fo, fo_num, sp_fo, fi, fi_num, sp_fi, 2*total_size);
 
         addr_t::ptr neu0_addr = std::make_shared<addr_t>(stmt, 1, 2*(0                                 ), 2*sp_bt*((sp_yo-1)*sy + ky)*xi*sp_fi);
         addr_t::ptr neu1_addr = std::make_shared<addr_t>(stmt, 1, 2*(sp_bt*((sp_yo-1)*sy + ky)*xi*sp_fi), 2*sp_bt*((sp_yo-1)*sy + ky)*xi*sp_fi);
@@ -5137,7 +5028,6 @@ void exec(symbol_stmt_t::ptr stmt) {
         int64_t py = stmt->py;
         int64_t xo = (xi + 2*px - kx + sx) / sx;
         int64_t yo = (yi + 2*py - ky + sy) / sy;
-        printf("parser.cpp: DEPTHWISE_CONV parameters:\n bt = %d\n xi = %d, yi = %d\n fi = %d\n kx = %d, ky = %d, sx = %d, sy = %d\n px = %d, py = %d\n xo = %d, yo = %d\n", bt, xi, yi, fi, kx, ky, sx, sy, px, py, xo, yo);
         // data_size: 2byte
         int64_t total_size;
         int64_t sp_bt = bt;
@@ -5157,8 +5047,8 @@ void exec(symbol_stmt_t::ptr stmt) {
             single_flag = 1;
           }
           else {
-            printf("parser.cpp DEEPTHWISE_CONV too large to handle!!!");
-            exit(0);
+            stmt->error() << "DEEPTHWISE_CONV too large to handle!!!" << stmt->eol();
+            return;
           }
         }
         else {
@@ -5174,11 +5064,10 @@ void exec(symbol_stmt_t::ptr stmt) {
             single_flag = 1;
           }
           else {
-            printf("parser.cpp DEEPTHWISE_CONV too large to handle!!!");
-            exit(0);
+            stmt->error() << "DEEPTHWISE_CONV too large to handle!!!" << stmt->eol();
+            return;
           }
         }
-        printf("parser.cpp: single_flag = %d, DEPTHWISE_CONV bt = %d, bt_num = %d, sp_bt = %d, 2*total_size = %d <= 1048576\n", single_flag, bt, bt_num, sp_bt, 2*total_size);
 
         if(single_flag == 1) {
           addr_t::ptr syn_addr = std::make_shared<addr_t>(stmt, 1, 2*(0            ), 2*kx*ky);
@@ -5359,8 +5248,8 @@ void exec(symbol_stmt_t::ptr stmt) {
           single_flag = 1;
         }
         else {
-          printf("parser.cpp: POOL too large to handle!\n");
-          exit(0);
+          stmt->error() << "POOL too large to handle!" << stmt->eol();
+          return;
         }
 
 
@@ -5527,11 +5416,16 @@ int main(int argc, char** argv) {
         get_output = true;
       } else if (argv[fno][1] == 'm') {
         show_spm = true;
+      } else if (!strncmp(argv[fno], "-wno-", 5)) {
+        warning_silent[std::string(argv[fno] + 5)] = true;
+      } else if (argv[fno][1] == 'w') {
+        warning_silent[std::string(argv[fno] + 2)] = false;
       }
     } else {
       fc++, read_source(argv[fno]);
     }
   }
+  raw.push_back("[EOF]");
   std::ofstream of(ofname);
   if (!fc) { std::cout << "no input files specified." << std::endl; return 0; }
   if (!of.good()) { std::cout << "failed to open output file \"" << ofname << "\"." << std::endl; return -1; }
