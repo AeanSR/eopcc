@@ -8,6 +8,7 @@
 // ======================================================
 // define a function. a function can be instantiated
 // multiple times, in different contexts.
+print "=== func basic ===================================";
 def foo(a, b) { // type of args `a` and `b` depends.
   int c;        // you can declare new variables.
   int i;
@@ -72,9 +73,9 @@ c *= 1 + a[0][0]; // <---- ok.
 foo(a, bias); // <---- this will be executed in main thread,
               //       as if the function body is inlined
               //       into here.
-
 // ======================================================
 
+print "=== undet vector =================================";
 // since the async call is executed simutaneously with
 // main thread, only one of the two threads could use
 // vector execution units.
@@ -88,11 +89,12 @@ def bar() {
 bar(); // <---- ok.
 except h = async bar(); // <---- ok.
 vector[10] a_on_main; // <---- will collide with `bar::a`!
-a_on_main -= 1; // <---- undeterministic behavior!
+//a_on_main -= 1; // <---- undeterministic behavior!
 await h;
 
 // ======================================================
 
+print "=== lambda func ==================================";
 // you can also do some tricky things with functions.
 // eopc functions are more like lambdas!
 
@@ -124,6 +126,7 @@ buz(10);
 
 // ======================================================
 
+print "=== multi except =================================";
 // async call cannot be nested. we have only two threads,
 // there are no third thread to support except in except.
 
@@ -156,4 +159,41 @@ await h2; //       but await on h2 first is ok. when `await h2`
           //       returns, following `await h1` returns
           //       immediately.
 
+// ========================================================
+print "=== redef ========================================";
+def redef_kernel() { print "kernel 1"; } // <---- first def, fine
+def use_kernel() { redef_kernel(); }     // <---- call last one
+use_kernel();
+// print: kernel 1
+def redef_kernel() { print "kernel 2"; } // <---- redef, fine but warned
+// 165:1:warning: function definition hides previous defined symbol in current scope.
+//         def redef_kernel() { print "kernel 2"; } // <---- redef, warning
+//         ^
+// 
+// 161:1:note: previous defined from here:
+//         def redef_kernel() { print "kernel 1"; } // <---- first def, fine
+//         ^
+use_kernel();
+// print: kernel 2
+redef redef_kernel() { print "kernel 3"; } // <---- redef, fine
+use_kernel();
+// print: kernel 3
 
+// ================================================
+print "=== __func__, __args__ ===========================";
+def inner(a, b, c) {
+  print a, b, c; // <-- use args
+  print __args__; // <-- same.
+  print __func__, __args__; // <-- pretty.
+}
+inner("a", 2, 3.5);
+
+def outter(a, b, c) {
+  inner(__args__); // <-- packed arg forward.
+}
+outter("b", 3, 4.5);
+
+def bind(b, c) {
+  inner("c", __args__); // <-- pack two args.
+}
+bind(4, 5.5);

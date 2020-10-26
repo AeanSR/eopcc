@@ -2405,6 +2405,7 @@ symbol_t::ptr prob(std::shared_ptr<ast_node_t> ast) {
         } return 0;
       };
       if (args) {
+        args->expand_funcargs();
         vargs = args->args;
       } else if (arg) {
         vargs.push_back(arg);
@@ -2413,7 +2414,7 @@ symbol_t::ptr prob(std::shared_ptr<ast_node_t> ast) {
         ast->error() << "callee must be a function." << ast->eol();
       } else {
         if (vargs.size() != func->args.size()) {
-          vargs.back()->error() << "expect exactly " << func->args.size() << " args, got " << vargs.size() << vargs.back()->eol();
+          ast->error() << "expect exactly " << func->args.size() << " args, got " << vargs.size() << ast->eol();
           func->note() << "function defined from here:" << func->eol();
         }
         symbol_registry.emplace_front(); // emplace new symbol scope, but alloc at origin scope in codegen.
