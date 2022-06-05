@@ -1,5 +1,5 @@
 # eopcc
-Artifacts of the TC paper "Breaking the Interaction Wall: A DLPU-Centric Deep Learning Computing System"
+Artifacts of the TC paper "[Breaking the Interaction Wall: A DLPU-Centric Deep Learning Computing System](https://ieeexplore.ieee.org/document/9292952)"
 
 ### prerequisite
 
