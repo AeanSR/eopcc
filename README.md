@@ -27,12 +27,12 @@ Compile and run full benchset:
 
 ### reference
 
-@ARTICLE{9292952,
-  author={Du, Zidong and Guo, Qi and Zhao, Yongwei and Zeng, Xi and Li, Ling and Cheng, Limin and Xu, Zhiwei and Sun, Ninghui and Chen, Yunji},
-  journal={IEEE Transactions on Computers}, 
-  title={Breaking the Interaction Wall: A DLPU-Centric Deep Learning Computing System}, 
-  year={2022},
-  volume={71},
-  number={1},
-  pages={209-222},
-  doi={10.1109/TC.2020.3044245}}
+    @ARTICLE{9292952,
+      author={Du, Zidong and Guo, Qi and Zhao, Yongwei and Zeng, Xi and Li, Ling and Cheng, Limin and Xu, Zhiwei and Sun, Ninghui and Chen, Yunji},
+      journal={IEEE Transactions on Computers}, 
+      title={Breaking the Interaction Wall: A DLPU-Centric Deep Learning Computing System}, 
+      year={2022},
+      volume={71},
+      number={1},
+      pages={209-222},
+      doi={10.1109/TC.2020.3044245}}
